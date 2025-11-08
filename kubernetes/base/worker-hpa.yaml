@@ -1,0 +1,46 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: locust-worker-hpa
+  namespace: locust
+  labels:
+    app: locust
+    component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: locust-worker
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # Scale when avg CPU > 70%
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80  # Scale when avg memory > 80%
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60  # Wait 60s before scaling up again
+      policies:
+      - type: Percent
+        value: 50      # Scale up by 50% of current replicas
+        periodSeconds: 60
+      - type: Pods
+        value: 2       # Or add 2 pods, whichever is greater
+        periodSeconds: 60
+      selectPolicy: Max  # Use the policy that scales faster
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+      - type: Percent
+        value: 10      # Scale down by 10% of current replicas
+        periodSeconds: 60
+      selectPolicy: Min  # Use the policy that scales slower

@@ -1,0 +1,55 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.venv
+venv
+ENV
+env
+
+# Testing and reports
+reports/
+*.html
+*.csv
+*.log
+
+# Terraform
+terraform/
+*.tfstate
+*.tfstate.*
+.terraform
+.terraform.lock.hcl
+
+# Kubernetes
+kubernetes/
+
+# Documentation
+*.md
+!README.md
+*.pdf
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scripts
+scripts/
