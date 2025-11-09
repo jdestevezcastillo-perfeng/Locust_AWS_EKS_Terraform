@@ -88,7 +88,7 @@ variable "node_instance_type" {
 variable "node_capacity_type" {
   description = "Type of capacity associated with the EKS Node Group. Valid values: ON_DEMAND, SPOT"
   type        = string
-  default     = "ON_DEMAND"
+  default     = "SPOT"
 
   validation {
     condition     = contains(["ON_DEMAND", "SPOT"], var.node_capacity_type)
