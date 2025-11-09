@@ -42,6 +42,59 @@ IMAGE_TAG=${2:-latest}
 clear
 print_header "LOCUST ON AWS EKS - COMPLETE DEPLOYMENT"
 echo ""
+
+# Interactive AWS Region Selection
+print_section "AWS Configuration"
+echo ""
+
+# Get current AWS region setting
+CURRENT_REGION=$(aws configure get region 2>/dev/null || echo "not set")
+print_info "Current AWS region: $CURRENT_REGION"
+echo ""
+
+# Common AWS regions
+declare -A REGIONS=(
+    [1]="eu-central-1   (Frankfurt - default)"
+    [2]="us-east-1      (Virginia)"
+    [3]="us-west-2      (Oregon)"
+    [4]="eu-west-1      (Ireland)"
+    [5]="ap-southeast-1 (Singapore)"
+    [6]="ap-northeast-1 (Tokyo)"
+)
+
+print_step "Select AWS region for deployment:"
+echo ""
+for key in "${!REGIONS[@]}"; do
+    echo "  $key) ${REGIONS[$key]}"
+done
+echo "  [Press Enter for current region ($CURRENT_REGION)]"
+echo ""
+
+read -p "Enter region number (1-6) or press Enter: " REGION_CHOICE
+
+case $REGION_CHOICE in
+    1) AWS_REGION="eu-central-1" ;;
+    2) AWS_REGION="us-east-1" ;;
+    3) AWS_REGION="us-west-2" ;;
+    4) AWS_REGION="eu-west-1" ;;
+    5) AWS_REGION="ap-southeast-1" ;;
+    6) AWS_REGION="ap-northeast-1" ;;
+    *) AWS_REGION="$CURRENT_REGION" ;;
+esac
+
+if [ "$AWS_REGION" = "not set" ]; then
+    print_warning "⚠️  AWS region not set!"
+    print_info "Please configure AWS region using: aws configure"
+    exit 1
+fi
+
+print_success "Using region: $AWS_REGION"
+echo ""
+
+# Export region for Terraform
+export AWS_REGION
+export TF_VAR_aws_region="$AWS_REGION"
+
 print_info "Environment: $ENVIRONMENT"
 print_info "Image Tag: $IMAGE_TAG"
 print_info "Project Root: $PROJECT_ROOT"
