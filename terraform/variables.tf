@@ -80,8 +80,8 @@ variable "node_instance_type" {
   default     = "t3.medium"
 
   validation {
-    condition     = can(regex("^t3\\.(small|medium|large|xlarge|2xlarge)$", var.node_instance_type))
-    error_message = "Node instance type must be a valid t3 instance (t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge)."
+    condition     = can(regex("^t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)$", var.node_instance_type))
+    error_message = "Node instance type must be a valid t3 instance (t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge)."
   }
 }
 

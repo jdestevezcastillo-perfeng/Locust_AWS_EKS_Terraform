@@ -15,8 +15,8 @@ cluster_endpoint_public_access_cidrs   = ["0.0.0.0/0"]  # Restrict to your IP in
 
 # EKS Node Group Configuration
 node_group_name      = "locust-nodes"
-node_instance_type   = "t3.medium"
-node_capacity_type   = "ON_DEMAND"  # Change to "SPOT" for cost savings (with availability risk)
+node_instance_type   = "t3.small"
+node_capacity_type   = "SPOT"  # Using SPOT for cost savings (~70% discount)
 node_disk_size       = 20
 desired_capacity     = 3
 min_capacity         = 3
