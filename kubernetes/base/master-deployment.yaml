@@ -21,11 +21,13 @@ spec:
       containers:
       - name: locust
         # This will be updated by deployment script with actual ECR URL
-        image: <ECR_REPO_URL>:latest
+        image: 649370233800.dkr.ecr.eu-central-1.amazonaws.com/locust-load-tests:latest
         imagePullPolicy: Always
         env:
         - name: LOCUST_MODE
           value: "master"
+        - name: LOCUST_FILE
+          value: "tests/locustfile.py"
         - name: TARGET_HOST
           valueFrom:
             configMapKeyRef:

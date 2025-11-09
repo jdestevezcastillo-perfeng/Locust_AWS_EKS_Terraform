@@ -1,20 +1,5 @@
-# Multi-stage Dockerfile for Locust Load Testing
-# Stage 1: Builder - Install dependencies
-FROM python:3.10-slim AS builder
-
-WORKDIR /build
-
-# Install Poetry for dependency management
-RUN pip install --no-cache-dir poetry==1.7.1
-
-# Copy dependency files
-COPY pyproject.toml poetry.lock ./
-
-# Export dependencies to requirements.txt (avoids Poetry in runtime image)
-RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
-
 ################################################################################
-# Stage 2: Runtime - Minimal production image
+# Runtime - Python image for Locust
 ################################################################################
 FROM python:3.10-slim
 
@@ -29,16 +14,12 @@ RUN groupadd -r locust -g 1000 && \
 
 WORKDIR /app
 
-# Copy requirements from builder stage
-COPY --from=builder /build/requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt && \
-    rm requirements.txt
+# Install Python dependencies from pyproject.toml
+# Using pip with PEP 621 format directly
+RUN pip install --no-cache-dir 'locust>=2.42.2,<3.0.0'
 
 # Copy application code
-COPY --chown=locust:locust locust/ ./locust/
-COPY --chown=locust:locust locustfile.py ./
+COPY --chown=locust:locust tests/ ./tests/
 COPY --chown=locust:locust docker/entrypoint.sh /entrypoint.sh
 
 # Make entrypoint executable
