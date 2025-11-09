@@ -26,9 +26,18 @@ Complete guide to deploying distributed Locust load testing on AWS EKS.
    - Production considerations
    - Troubleshooting guide
    - Cost analysis and optimization
+   - Persistent port-forward management
    - 60+ pages, 2-3 hour read
 
-4. **[DEPLOYMENT_SUMMARY.md](DEPLOYMENT_SUMMARY.md)** - File inventory
+4. **[PORTFORWARD_PERSISTENCE.md](PORTFORWARD_PERSISTENCE.md)** - Persistent Access System
+   - How automatic port-forwards work
+   - Service-based routing (survives pod redeployments)
+   - Health check system (automatic recovery)
+   - Systemd service configuration
+   - Monitoring and troubleshooting
+   - 380+ lines, comprehensive technical guide
+
+5. **[DEPLOYMENT_SUMMARY.md](DEPLOYMENT_SUMMARY.md)** - File inventory
    - Complete file-by-file breakdown
    - Resource specifications
    - Validation checklists
@@ -105,7 +114,16 @@ Complete guide to deploying distributed Locust load testing on AWS EKS.
 ### Troubleshooting Issues
 1. [QUICKSTART.md](QUICKSTART.md#troubleshooting) - Common issues
 2. [SRE_DEPLOYMENT_GUIDE.md](SRE_DEPLOYMENT_GUIDE.md#troubleshooting-guide) - Detailed solutions
-3. Run: `./scripts/verify-deployment.sh`
+3. [PORTFORWARD_PERSISTENCE.md](PORTFORWARD_PERSISTENCE.md#troubleshooting) - Port-forward issues
+4. Run: `./scripts/verify-deployment.sh`
+
+### Accessing Services and Dashboards
+1. **All services are automatically accessible at:**
+   - Locust Web UI: http://localhost:8089
+   - Locust Metrics: http://localhost:9091/metrics
+   - Grafana: http://localhost:3000 (admin/admin123)
+   - Prometheus: http://localhost:9090
+2. See [PORTFORWARD_PERSISTENCE.md](PORTFORWARD_PERSISTENCE.md) for persistent access details
 
 ### Cost Management
 1. [README_SRE.md](README_SRE.md#cost-management) - Cost breakdown

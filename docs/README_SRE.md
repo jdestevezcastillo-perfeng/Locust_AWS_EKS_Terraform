@@ -173,6 +173,14 @@ kubectl get svc locust-master -n locust
 - **Health Checks:** Automatic pod restart on failure
 - **LoadBalancer Service:** External access to web UI
 
+### Monitoring & Observability
+
+- **✅ Prometheus Metrics:** Full metrics collection from Locust
+- **✅ Grafana Dashboards:** Pre-configured visualization with metrics
+- **✅ Persistent Port-Forwards:** Auto-start on boot, auto-recover if down
+- **✅ 24/7 Accessibility:** Services survive pod redeployments
+- **✅ Health Checks:** Every 60 seconds with automatic recovery
+
 ### Security
 
 - **Non-Root Containers:** Runs as UID 1000 (locust user)
@@ -187,6 +195,7 @@ kubectl get svc locust-master -n locust
 - **Single-Command Destruction:** `./scripts/destroy.sh`
 - **Health Verification:** `./scripts/verify-deployment.sh`
 - **Image Versioning:** Supports git SHA tags for traceability
+- **Persistent Access:** Automatic port-forward management with systemd
 
 ## Test Scenarios
 

@@ -25,19 +25,42 @@ This single command will:
 **Time:** 25-30 minutes
 **Cost:** ~$0.34/hour while running
 
-## Access Locust Web UI
+## Access All Services
 
-After deployment completes, access the web interface at the URL shown:
+All services are **automatically accessible with persistent, self-healing port-forwards**:
 
+### 🔵 Locust Web UI (Load Testing)
 ```
-http://<loadbalancer-url>:8089
+http://localhost:8089
 ```
+Dashboard to create and run load tests, view real-time metrics, configure users and spawn rate
 
-Or retrieve it anytime:
-
-```bash
-kubectl get svc locust-master -n locust
+### 📊 Locust Metrics (Prometheus Format)
 ```
+http://localhost:9091/metrics
+```
+Raw Prometheus metrics - scraped automatically by Prometheus
+
+### 📈 Grafana Dashboards
+```
+http://localhost:3000
+Username: admin
+Password: admin123
+```
+Pre-configured dashboards showing request rates, response times, error rates, user count, worker metrics
+
+### 📉 Prometheus Metrics Database
+```
+http://localhost:9090
+```
+Query raw metrics using PromQL, view scrape targets and alerts
+
+**All port-forwards are persistent:**
+- ✅ Auto-start on system boot
+- ✅ Auto-recover if services fail (checked every 60 seconds)
+- ✅ Survive pod redeployments
+- ✅ No terminal or background process needed
+- ✅ Work 24/7
 
 ## Useful Commands
 
