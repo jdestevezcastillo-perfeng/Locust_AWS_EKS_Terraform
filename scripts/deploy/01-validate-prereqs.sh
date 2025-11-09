@@ -15,7 +15,36 @@ check_commands "${required_commands[@]}" || error_exit "Please install missing c
 print_success "All required commands found"
 
 print_section "Validating AWS Credentials"
-validate_aws_credentials || error_exit "AWS credentials invalid"
+
+# Check if AWS credentials are configured
+if ! validate_aws_credentials 2>/dev/null; then
+    print_warning "❌ AWS credentials not found or invalid"
+    echo ""
+    print_step "Please configure AWS credentials using:"
+    echo ""
+    print_status "  aws configure"
+    echo ""
+    print_info "You will be prompted for:"
+    print_step "  • AWS Access Key ID"
+    print_step "  • AWS Secret Access Key"
+    print_step "  • Default region (e.g., eu-central-1)"
+    print_step "  • Output format (json)"
+    echo ""
+    print_info "Get your AWS credentials from:"
+    print_status "  https://console.aws.amazon.com/iam/home?#/security_credentials"
+    echo ""
+    read -p "Press Enter after you've configured AWS credentials: "
+
+    # Retry validation
+    validate_aws_credentials || error_exit "AWS credentials still invalid. Please check your setup."
+fi
+
+# Display who is deploying
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
+AWS_USER=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null | awk -F/ '{print $NF}' || echo "unknown")
+print_success "✅ AWS credentials valid"
+print_info "  Account: $ACCOUNT_ID"
+print_info "  User: $AWS_USER"
 
 print_section "Checking AWS Permissions"
 print_step "Verifying IAM permissions..."
