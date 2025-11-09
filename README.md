@@ -65,6 +65,23 @@ Ensure you have installed:
 - `jq` (JSON parser)
 - AWS account with IAM permissions
 
+### First Time Setup (New Users)
+
+If you just cloned this project, you need to configure AWS credentials:
+
+**[→ See AWS_SETUP.md for step-by-step instructions](AWS_SETUP.md)**
+
+TL;DR:
+```bash
+# 1. Create IAM user in AWS console and get Access Key
+# 2. Configure AWS CLI
+aws configure
+
+# 3. Enter credentials when prompted
+# 4. Verify it worked
+aws sts get-caller-identity
+```
+
 ### Deploy in 3 Steps
 
 ```bash
@@ -77,6 +94,11 @@ cd /home/lostborion/Documents/veeam-extended
 # 3. Access Locust UI
 # URL will be displayed at the end
 ```
+
+The deployment script will:
+- ✅ Validate AWS credentials
+- ✅ Ask you to select a region
+- ✅ Deploy all infrastructure automatically
 
 That's it! Your Locust cluster is running on AWS EKS.
 
