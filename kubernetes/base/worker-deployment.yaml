@@ -23,6 +23,10 @@ spec:
         # This will be updated by deployment script with actual ECR URL
         image: 649370233800.dkr.ecr.eu-central-1.amazonaws.com/locust-load-tests:latest
         imagePullPolicy: Always
+        ports:
+        - containerPort: 8090
+          name: prometheus
+          protocol: TCP
         env:
         - name: LOCUST_MODE
           value: "worker"
