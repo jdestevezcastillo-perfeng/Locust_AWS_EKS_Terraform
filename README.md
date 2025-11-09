@@ -46,6 +46,10 @@ Automates the complete deployment of:
 ✅ **Multi-Environment**: Dev, staging, production configurations
 ✅ **Well-Documented**: Comprehensive guides and inline comments
 ✅ **Cost-Conscious**: Easy cleanup prevents unexpected bills
+✅ **Prometheus Integration**: Full metrics collection with dashboard-compatible naming
+✅ **Persistent Access**: Automatic port-forwards with health checks (survive pod restarts)
+✅ **Grafana Dashboards**: Pre-configured monitoring dashboards
+✅ **Zero-Maintenance Monitoring**: Automatic recovery if services go down
 
 ---
 
@@ -185,20 +189,50 @@ veeam-extended/
 # You'll be asked to confirm with 'destroy' and 'yes'
 ```
 
-### Access Locust Web UI
+### Access All Services
 
-After deployment, the LoadBalancer URL will be displayed:
+All services have **persistent, auto-recovering port-forwards** that survive pod restarts and system reboots:
 
+#### 🔵 Locust Web UI (Load Testing)
 ```
-http://<EXTERNAL-IP>:8089
+http://localhost:8089
 ```
+- Dashboard for running tests
+- Real-time metrics
+- User and spawn rate controls
 
-Or port-forward locally:
-
-```bash
-kubectl port-forward -n locust svc/locust-master 8089:8089
-# Then open: http://localhost:8089
+#### 📊 Locust Metrics (Prometheus Format)
 ```
+http://localhost:9091/metrics
+```
+- Raw Prometheus metrics
+- Scraped by Prometheus every 30 seconds
+- Includes: requests, response times, failures, percentiles, etc.
+
+#### 📈 Grafana (Dashboards)
+```
+http://localhost:3000
+Username: admin
+Password: admin123
+```
+- Pre-configured Locust dashboards
+- Request rates, response times, error rates
+- User and worker count metrics
+
+#### 📉 Prometheus (Metrics Database)
+```
+http://localhost:9090
+```
+- Query Prometheus metrics directly
+- PromQL support
+- Data retention: 7-30 days (configurable)
+
+**All port-forwards are automatic and persistent:**
+- ✅ Start automatically on system boot
+- ✅ Auto-recover if they fail (health check every 1 minute)
+- ✅ Survive pod redeployments
+- ✅ No terminal session needed
+- ✅ Available 24/7
 
 ### Common Operations
 

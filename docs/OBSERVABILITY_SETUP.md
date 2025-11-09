@@ -4,11 +4,31 @@
 
 This guide provides instructions for setting up Prometheus and Grafana observability for monitoring your Locust load testing cluster on AWS EKS.
 
+**✅ AUTOMATED & PERSISTENT:** All monitoring access points are now automatically configured and persistent! Services survive pod redeployments and system reboots.
+
 **Prerequisites:**
 - AWS EKS cluster deployed and running (via `./deploy.sh`)
 - `kubectl` configured and authenticated to your cluster
 - `helm` 3.0+ installed locally
 - Locust workloads running in the `locust` namespace
+
+## Access Monitoring Services
+
+All monitoring interfaces are **automatically accessible and persistent**:
+
+| Service | URL | Credentials | Status |
+|---------|-----|-------------|--------|
+| **Locust Metrics** | http://localhost:9091/metrics | None (Prometheus format) | ✅ Auto-start & recover |
+| **Grafana** | http://localhost:3000 | admin / admin123 | ✅ Auto-start & recover |
+| **Prometheus** | http://localhost:9090 | None | ✅ Auto-start & recover |
+
+**Key Features:**
+- ✅ Automatic startup on system boot
+- ✅ Auto-recovery if services fail (health checks every 60 seconds)
+- ✅ Survive pod redeployments
+- ✅ No manual intervention needed
+
+For detailed information about persistent port-forwards, see [PORTFORWARD_PERSISTENCE.md](PORTFORWARD_PERSISTENCE.md).
 
 ## Quick Start
 

@@ -1520,6 +1520,41 @@ aws logs filter-log-events \
     --region eu-central-1
 ```
 
+### Persistent Port-Forward Management
+
+**NEW FEATURE:** All services now have automatic, persistent port-forwards that survive pod redeployments and system reboots!
+
+For detailed information on the persistent port-forward system:
+- **Main Guide:** See [PORTFORWARD_PERSISTENCE.md](PORTFORWARD_PERSISTENCE.md) for comprehensive documentation
+- **What You Get:**
+  - ✅ Locust Web UI (port 8089) - Always accessible
+  - ✅ Locust Metrics (port 9091) - Prometheus format metrics
+  - ✅ Grafana (port 3000) - Dashboards and visualization
+  - ✅ Prometheus (port 9090) - Metrics database
+  - ✅ Automatic recovery if ports go down (checked every 60 seconds)
+  - ✅ Auto-start on system reboot via systemd
+
+**Quick Access:**
+```bash
+# All services are automatically accessible at:
+http://localhost:8089     # Locust Web UI
+http://localhost:9091/metrics  # Locust Prometheus metrics
+http://localhost:3000     # Grafana (admin/admin123)
+http://localhost:9090     # Prometheus
+```
+
+**Manual Port-Forward Restart (if needed):**
+```bash
+/usr/local/bin/start-locust-portforward.sh
+/usr/local/bin/start-monitoring-portforward.sh
+```
+
+**Health Check Logs:**
+```bash
+tail -f /var/log/locust-portforward-health.log
+tail -f /var/log/monitoring-portforward-health.log
+```
+
 ### Grafana Dashboard (Optional)
 
 For production monitoring, deploy Prometheus + Grafana:
