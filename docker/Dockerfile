@@ -14,9 +14,9 @@ RUN groupadd -r locust -g 1000 && \
 
 WORKDIR /app
 
-# Install Python dependencies from pyproject.toml
-# Using pip with PEP 621 format directly
-RUN pip install --no-cache-dir 'locust>=2.42.2,<3.0.0'
+# Install Python dependencies
+# Locust + Prometheus metrics exporter
+RUN pip install --no-cache-dir 'locust>=2.42.2,<3.0.0' 'prometheus-client>=0.17.0'
 
 # Copy application code
 COPY --chown=locust:locust tests/ ./tests/
@@ -31,7 +31,8 @@ USER locust
 # Expose Locust ports
 # 8089: Web UI
 # 5557: Master-worker communication
-EXPOSE 8089 5557
+# 8090: Prometheus metrics
+EXPOSE 8089 5557 8090
 
 # Health check (pings Locust web interface)
 # Only works for master mode; workers will rely on process check

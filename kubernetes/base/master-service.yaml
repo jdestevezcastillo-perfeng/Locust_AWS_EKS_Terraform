@@ -20,4 +20,8 @@ spec:
     targetPort: 5557
     protocol: TCP
     name: master-communication
+  - port: 8090
+    targetPort: 8090
+    protocol: TCP
+    name: prometheus
   sessionAffinity: ClientIP  # Sticky sessions for web UI
