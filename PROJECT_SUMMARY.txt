@@ -49,7 +49,7 @@ KUBERNETES CLUSTER:
 DOCKER IMAGE:
   • Python 3.10 base
   • Locust 2.42.2+
-  • Poetry for dependency management
+  • Prometheus metrics exporter
   • Multiple test scenarios included
   • Non-root user execution (security)
 
@@ -80,8 +80,12 @@ veeam-extended/
 │   ├── configmap.yaml                     Test configuration
 │   ├── master-deployment.yaml             Locust master
 │   ├── master-service.yaml                LoadBalancer service
+│   ├── master-internal-service.yaml       Internal service (worker comms)
 │   ├── worker-deployment.yaml             Locust workers
 │   └── worker-hpa.yaml                    Auto-scaling config
+│
+├── kubernetes/monitoring/                 Prometheus Operator resources
+│   └── locust-servicemonitor.yaml         Scrapes Locust metrics
 │
 ├── tests/                                 Load test scenarios
 │   ├── locustfile.py                      Main entry point

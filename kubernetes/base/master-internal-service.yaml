@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: locust-master-internal
+  namespace: locust
+  labels:
+    app: locust
+    component: master
+spec:
+  type: ClusterIP
+  selector:
+    app: locust
+    component: master
+  ports:
+  - port: 5557
+    targetPort: 5557
+    protocol: TCP
+    name: master-communication

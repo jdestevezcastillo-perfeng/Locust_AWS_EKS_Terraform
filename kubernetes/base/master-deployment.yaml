@@ -17,11 +17,15 @@ spec:
       labels:
         app: locust
         component: master
+        prometheus: enabled
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
       - name: locust
-        # This will be updated by deployment script with actual ECR URL
-        image: 649370233800.dkr.ecr.eu-central-1.amazonaws.com/locust-load-tests:latest
+        image: __LOCUST_IMAGE__
         imagePullPolicy: Always
         env:
         - name: LOCUST_MODE
@@ -51,6 +55,9 @@ spec:
           protocol: TCP
         - containerPort: 5557
           name: master-bind
+          protocol: TCP
+        - containerPort: 8090
+          name: prometheus
           protocol: TCP
         resources:
           requests:

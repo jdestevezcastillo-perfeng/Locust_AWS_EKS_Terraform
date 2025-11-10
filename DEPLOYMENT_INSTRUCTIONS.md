@@ -134,6 +134,10 @@ The script will output colored status messages. Watch for:
 ✗ Errors (red)
 ```
 
+During this phase you will be prompted to:
+- Choose the AWS region from a curated list
+- Enter comma-separated CIDR blocks allowed to reach the EKS API server (0.0.0.0/0 is rejected unless `ALLOW_INSECURE_ENDPOINT=true`)
+
 ### Step 5: Wait for LoadBalancer IP
 
 Near the end, you'll see:
@@ -193,7 +197,7 @@ You should see the Locust dashboard with:
 
 - Based on Python 3.10
 - Includes Locust framework
-- Includes Poetry for dependency management
+- Includes Prometheus metrics exporter
 - Includes multiple test scenarios
 
 ### How It Works

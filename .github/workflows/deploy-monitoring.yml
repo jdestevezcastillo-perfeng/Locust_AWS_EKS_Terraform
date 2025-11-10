@@ -1,0 +1,948 @@
+name: Deploy Monitoring Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster-name:
+        description: 'EKS cluster name (leave empty to auto-detect from Terraform)'
+        required: false
+        type: string
+      aws-region:
+        description: 'AWS region'
+        required: true
+        type: choice
+        options:
+          - eu-central-1
+          - us-east-1
+          - us-west-2
+          - ap-southeast-1
+        default: 'eu-central-1'
+      prometheus-version:
+        description: 'Prometheus chart version'
+        required: false
+        type: string
+        default: '25.3.1'
+      grafana-admin-password:
+        description: 'Grafana admin password (leave empty to use default from secrets)'
+        required: false
+        type: string
+      retention-days:
+        description: 'Prometheus data retention (days)'
+        required: false
+        type: number
+        default: 30
+      storage-size:
+        description: 'Prometheus storage size (Gi)'
+        required: false
+        type: number
+        default: 50
+      enable-alertmanager:
+        description: 'Enable Alertmanager'
+        required: false
+        type: boolean
+        default: true
+      skip-health-checks:
+        description: 'Skip health checks (for debugging)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  MONITORING_NAMESPACE: monitoring
+  LOCUST_NAMESPACE: locust
+  GRAFANA_CHART_VERSION: '7.0.8'
+
+jobs:
+  deploy-monitoring:
+    name: Deploy Prometheus & Grafana
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout and Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup prerequisites
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ inputs.aws-region }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          cluster-name: ${{ inputs.cluster-name }}
+
+      # -----------------------------------------------------------------------
+      # Namespace Setup
+      # -----------------------------------------------------------------------
+      - name: Create monitoring namespace
+        run: |
+          echo "Creating monitoring namespace..."
+          if kubectl get namespace ${{ env.MONITORING_NAMESPACE }} &> /dev/null; then
+            echo "Namespace '${{ env.MONITORING_NAMESPACE }}' already exists"
+          else
+            kubectl create namespace ${{ env.MONITORING_NAMESPACE }}
+            kubectl label namespace ${{ env.MONITORING_NAMESPACE }} name=${{ env.MONITORING_NAMESPACE }}
+            echo "Namespace '${{ env.MONITORING_NAMESPACE }}' created"
+          fi
+
+      - name: Verify Locust namespace exists
+        run: |
+          echo "Verifying Locust namespace exists..."
+          if ! kubectl get namespace ${{ env.LOCUST_NAMESPACE }} &> /dev/null; then
+            echo "WARNING: Locust namespace '${{ env.LOCUST_NAMESPACE }}' does not exist"
+            echo "Creating Locust namespace for testing..."
+            kubectl create namespace ${{ env.LOCUST_NAMESPACE }}
+          else
+            echo "Locust namespace '${{ env.LOCUST_NAMESPACE }}' exists"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Prometheus Configuration
+      # -----------------------------------------------------------------------
+      - name: Generate Prometheus values file
+        run: |
+          GRAFANA_PASSWORD="${{ inputs.grafana-admin-password }}"
+          if [ -z "$GRAFANA_PASSWORD" ]; then
+            GRAFANA_PASSWORD="${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+          fi
+          if [ -z "$GRAFANA_PASSWORD" ]; then
+            GRAFANA_PASSWORD="admin123"
+            echo "WARNING: Using default Grafana password. Set GRAFANA_ADMIN_PASSWORD secret for production."
+          fi
+
+          cat > /tmp/prometheus-values.yaml <<EOF
+          prometheus:
+            prometheusSpec:
+              retention: ${{ inputs.retention-days }}d
+              storageSpec:
+                volumeClaimTemplate:
+                  spec:
+                    accessModes: ["ReadWriteOnce"]
+                    resources:
+                      requests:
+                        storage: ${{ inputs.storage-size }}Gi
+
+              # Service Monitor selector - allow all ServiceMonitors
+              serviceMonitorSelectorNilUsesHelmValues: false
+              serviceMonitorSelector: {}
+
+              # Pod Monitor selector - allow all PodMonitors
+              podMonitorSelectorNilUsesHelmValues: false
+              podMonitorSelector: {}
+
+              # Rule selector - allow all PrometheusRules
+              ruleSelectorNilUsesHelmValues: false
+              ruleSelector: {}
+
+              # Additional scrape configs for Locust metrics
+              additionalScrapeConfigs:
+                # Scrape Locust master metrics endpoint
+                - job_name: 'locust-master-prometheus'
+                  kubernetes_sd_configs:
+                    - role: pod
+                      namespaces:
+                        names:
+                          - ${{ env.LOCUST_NAMESPACE }}
+                  relabel_configs:
+                    - source_labels: [__meta_kubernetes_pod_label_app]
+                      action: keep
+                      regex: locust
+                    - source_labels: [__meta_kubernetes_pod_label_component]
+                      action: keep
+                      regex: master
+                    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                      action: keep
+                      regex: true
+                    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                      action: replace
+                      target_label: __metrics_path__
+                      regex: (.+)
+                    - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                      action: replace
+                      regex: ([^:]+)(?::\d+)?;(\d+)
+                      replacement: \$1:\$2
+                      target_label: __address__
+                    - source_labels: [__meta_kubernetes_pod_name]
+                      target_label: pod
+                    - source_labels: [__meta_kubernetes_namespace]
+                      target_label: namespace
+                  metric_relabel_configs:
+                    # Ensure proper metric naming
+                    - source_labels: [__name__]
+                      regex: 'locust_.*'
+                      action: keep
+
+                # Auto-discover pods with prometheus.io annotations
+                - job_name: 'kubernetes-pods-annotated'
+                  kubernetes_sd_configs:
+                    - role: pod
+                      namespaces:
+                        names:
+                          - ${{ env.LOCUST_NAMESPACE }}
+                  relabel_configs:
+                    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                      action: keep
+                      regex: true
+                    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                      action: replace
+                      target_label: __metrics_path__
+                      regex: (.+)
+                    - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                      action: replace
+                      regex: ([^:]+)(?::\d+)?;(\d+)
+                      replacement: \$1:\$2
+                      target_label: __address__
+                    - source_labels: [__meta_kubernetes_namespace]
+                      action: replace
+                      target_label: namespace
+                    - source_labels: [__meta_kubernetes_pod_name]
+                      action: replace
+                      target_label: pod
+
+          # Prometheus Node Exporter for host metrics
+          prometheus-node-exporter:
+            enabled: true
+
+          # Disable Prometheus Pushgateway (not needed for Locust)
+          prometheus-pushgateway:
+            enabled: false
+
+          # Grafana configuration
+          grafana:
+            enabled: true
+            adminPassword: "${GRAFANA_PASSWORD}"
+
+            # Persistent storage for dashboards
+            persistence:
+              enabled: true
+              size: 10Gi
+              storageClassName: gp2
+
+            # Service configuration
+            service:
+              type: ClusterIP
+              port: 80
+
+            # Datasources configuration
+            datasources:
+              datasources.yaml:
+                apiVersion: 1
+                datasources:
+                  - name: Prometheus
+                    type: prometheus
+                    url: http://prometheus-kube-prometheus-prometheus.${{ env.MONITORING_NAMESPACE }}.svc.cluster.local:9090
+                    access: proxy
+                    isDefault: true
+                    jsonData:
+                      timeInterval: 15s
+
+            # Dashboard providers
+            dashboardProviders:
+              dashboardproviders.yaml:
+                apiVersion: 1
+                providers:
+                  - name: 'default'
+                    orgId: 1
+                    folder: ''
+                    type: file
+                    disableDeletion: false
+                    editable: true
+                    options:
+                      path: /var/lib/grafana/dashboards/default
+                  - name: 'locust'
+                    orgId: 1
+                    folder: 'Locust'
+                    type: file
+                    disableDeletion: false
+                    editable: true
+                    options:
+                      path: /var/lib/grafana/dashboards/locust
+
+            # Pre-configured dashboards
+            dashboards:
+              default:
+                kubernetes-cluster:
+                  gnetId: 7249
+                  revision: 1
+                  datasource: Prometheus
+                kubernetes-pods:
+                  gnetId: 6417
+                  revision: 1
+                  datasource: Prometheus
+
+          # AlertManager configuration
+          alertmanager:
+            enabled: ${{ inputs.enable-alertmanager }}
+            config:
+              global:
+                resolve_timeout: 5m
+              route:
+                group_by: ['alertname', 'cluster', 'service']
+                group_wait: 10s
+                group_interval: 10s
+                repeat_interval: 12h
+                receiver: 'default'
+              receivers:
+                - name: 'default'
+                  # Add webhook, email, or Slack configuration here
+
+          # Kube State Metrics for Kubernetes metrics
+          kubeStateMetrics:
+            enabled: true
+
+          # Node Exporter for node-level metrics
+          nodeExporter:
+            enabled: true
+          EOF
+
+          echo "Prometheus values file generated at /tmp/prometheus-values.yaml"
+
+      # -----------------------------------------------------------------------
+      # Deploy Prometheus and Grafana
+      # -----------------------------------------------------------------------
+      - name: Deploy Prometheus stack
+        run: |
+          echo "Deploying kube-prometheus-stack..."
+          helm upgrade --install prometheus-kube-prometheus \
+            prometheus-community/kube-prometheus-stack \
+            --namespace ${{ env.MONITORING_NAMESPACE }} \
+            --values /tmp/prometheus-values.yaml \
+            --version ${{ inputs.prometheus-version }} \
+            --wait \
+            --timeout 15m \
+            --create-namespace
+
+          echo "Prometheus stack deployed successfully"
+
+      # -----------------------------------------------------------------------
+      # Deploy Locust ServiceMonitor
+      # -----------------------------------------------------------------------
+      - name: Deploy Locust ServiceMonitor
+        run: |
+          echo "Deploying Locust ServiceMonitor..."
+          if [ -f kubernetes/base/locust-servicemonitor.yaml ]; then
+            kubectl apply -f kubernetes/base/locust-servicemonitor.yaml
+            echo "Locust ServiceMonitor deployed from kubernetes/base/locust-servicemonitor.yaml"
+          else
+            echo "Creating Locust ServiceMonitor..."
+            cat <<EOF | kubectl apply -f -
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: locust-master
+            namespace: ${{ env.LOCUST_NAMESPACE }}
+            labels:
+              app: locust
+              component: master
+              release: prometheus-kube-prometheus
+          spec:
+            selector:
+              matchLabels:
+                app: locust
+                component: master
+            endpoints:
+              - port: prometheus
+                path: /metrics
+                interval: 15s
+                scrapeTimeout: 10s
+          EOF
+            echo "Locust ServiceMonitor created"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Deploy Prometheus Alert Rules
+      # -----------------------------------------------------------------------
+      - name: Deploy Prometheus alert rules
+        run: |
+          echo "Creating Prometheus alert rules for Locust..."
+          cat <<EOF | kubectl apply -f -
+          apiVersion: monitoring.coreos.com/v1
+          kind: PrometheusRule
+          metadata:
+            name: locust-alerts
+            namespace: ${{ env.MONITORING_NAMESPACE }}
+            labels:
+              prometheus: kube-prometheus
+              release: prometheus-kube-prometheus
+          spec:
+            groups:
+              - name: locust.rules
+                interval: 30s
+                rules:
+                  # Critical: Locust master is down
+                  - alert: LocustMasterDown
+                    expr: up{job="locust-master-prometheus"} == 0
+                    for: 5m
+                    labels:
+                      severity: critical
+                      component: locust
+                    annotations:
+                      summary: "Locust master is down"
+                      description: "Locust master pod in namespace {{ \$labels.namespace }} has been down for more than 5 minutes"
+
+                  # Warning: High error rate in load tests
+                  - alert: LocustHighErrorRate
+                    expr: |
+                      (
+                        sum(rate(locust_requests_num_failures[5m])) /
+                        sum(rate(locust_requests_num_requests[5m]))
+                      ) > 0.1
+                    for: 5m
+                    labels:
+                      severity: warning
+                      component: locust
+                    annotations:
+                      summary: "High error rate in Locust load tests"
+                      description: "Error rate is {{ \$value | humanizePercentage }} (above 10% threshold)"
+
+                  # Warning: High response time
+                  - alert: LocustHighResponseTime
+                    expr: |
+                      locust_requests_avg_response_time > 5000
+                    for: 5m
+                    labels:
+                      severity: warning
+                      component: locust
+                    annotations:
+                      summary: "High average response time in Locust"
+                      description: "Average response time is {{ \$value }}ms (above 5000ms threshold) for {{ \$labels.name }}"
+
+                  # Warning: High memory usage in Locust pods
+                  - alert: LocustHighMemoryUsage
+                    expr: |
+                      (
+                        sum(container_memory_usage_bytes{namespace="${{ env.LOCUST_NAMESPACE }}", pod=~"locust-.*"}) /
+                        sum(container_spec_memory_limit_bytes{namespace="${{ env.LOCUST_NAMESPACE }}", pod=~"locust-.*"})
+                      ) > 0.85
+                    for: 5m
+                    labels:
+                      severity: warning
+                      component: locust
+                    annotations:
+                      summary: "High memory usage in Locust pods"
+                      description: "Memory usage is {{ \$value | humanizePercentage }} (above 85% threshold)"
+
+                  # Warning: Worker pod restarts
+                  - alert: LocustWorkerRestarts
+                    expr: |
+                      rate(kube_pod_container_status_restarts_total{namespace="${{ env.LOCUST_NAMESPACE }}", pod=~"locust-worker-.*"}[15m]) > 0
+                    for: 5m
+                    labels:
+                      severity: warning
+                      component: locust
+                    annotations:
+                      summary: "Locust worker pods are restarting"
+                      description: "Pod {{ \$labels.pod }} has restarted {{ \$value }} times in the last 15 minutes"
+          EOF
+          echo "Prometheus alert rules deployed"
+
+      # -----------------------------------------------------------------------
+      # Deploy Locust Grafana Dashboard
+      # -----------------------------------------------------------------------
+      - name: Deploy Locust Grafana dashboard
+        run: |
+          echo "Creating Locust Grafana dashboard ConfigMap..."
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: locust-dashboard
+            namespace: ${{ env.MONITORING_NAMESPACE }}
+            labels:
+              grafana_dashboard: "1"
+          data:
+            locust-dashboard.json: |
+              {
+                "annotations": {
+                  "list": [
+                    {
+                      "builtIn": 1,
+                      "datasource": "-- Grafana --",
+                      "enable": true,
+                      "hide": true,
+                      "iconColor": "rgba(0, 211, 255, 1)",
+                      "name": "Annotations & Alerts",
+                      "type": "dashboard"
+                    }
+                  ]
+                },
+                "editable": true,
+                "gnetId": null,
+                "graphTooltip": 1,
+                "id": null,
+                "links": [],
+                "panels": [
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "color": {"mode": "thresholds"},
+                        "mappings": [],
+                        "thresholds": {
+                          "mode": "absolute",
+                          "steps": [
+                            {"color": "red", "value": null},
+                            {"color": "green", "value": 1}
+                          ]
+                        },
+                        "unit": "short"
+                      }
+                    },
+                    "gridPos": {"h": 6, "w": 4, "x": 0, "y": 0},
+                    "id": 1,
+                    "options": {
+                      "colorMode": "background",
+                      "graphMode": "none",
+                      "justifyMode": "auto",
+                      "orientation": "auto",
+                      "reduceOptions": {
+                        "calcs": ["lastNotNull"],
+                        "fields": "",
+                        "values": false
+                      }
+                    },
+                    "pluginVersion": "10.0.0",
+                    "targets": [
+                      {
+                        "expr": "up{job=\"locust-master-prometheus\"}",
+                        "refId": "A"
+                      }
+                    ],
+                    "title": "Locust Master Status",
+                    "type": "stat"
+                  },
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "color": {"mode": "palette-classic"},
+                        "custom": {
+                          "axisLabel": "Requests/sec",
+                          "axisPlacement": "auto",
+                          "barAlignment": 0,
+                          "drawStyle": "line",
+                          "fillOpacity": 20,
+                          "gradientMode": "none",
+                          "lineInterpolation": "smooth",
+                          "lineWidth": 2,
+                          "pointSize": 5,
+                          "showPoints": "never",
+                          "spanNulls": true
+                        },
+                        "mappings": [],
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+                        "unit": "reqps"
+                      }
+                    },
+                    "gridPos": {"h": 8, "w": 12, "x": 4, "y": 0},
+                    "id": 2,
+                    "options": {
+                      "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+                      "tooltip": {"mode": "multi"}
+                    },
+                    "targets": [
+                      {
+                        "expr": "sum(rate(locust_requests_num_requests[1m]))",
+                        "legendFormat": "Total RPS",
+                        "refId": "A"
+                      },
+                      {
+                        "expr": "sum(rate(locust_requests_num_failures[1m]))",
+                        "legendFormat": "Error RPS",
+                        "refId": "B"
+                      }
+                    ],
+                    "title": "Request Rate",
+                    "type": "timeseries"
+                  },
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "color": {"mode": "thresholds"},
+                        "mappings": [],
+                        "max": 100,
+                        "min": 0,
+                        "thresholds": {
+                          "mode": "absolute",
+                          "steps": [
+                            {"color": "green", "value": null},
+                            {"color": "yellow", "value": 5},
+                            {"color": "red", "value": 10}
+                          ]
+                        },
+                        "unit": "percent"
+                      }
+                    },
+                    "gridPos": {"h": 6, "w": 4, "x": 16, "y": 0},
+                    "id": 3,
+                    "options": {
+                      "orientation": "auto",
+                      "reduceOptions": {
+                        "calcs": ["lastNotNull"],
+                        "fields": "",
+                        "values": false
+                      },
+                      "showThresholdLabels": false,
+                      "showThresholdMarkers": true
+                    },
+                    "pluginVersion": "10.0.0",
+                    "targets": [
+                      {
+                        "expr": "(sum(rate(locust_requests_num_failures[5m])) / sum(rate(locust_requests_num_requests[5m]))) * 100",
+                        "refId": "A"
+                      }
+                    ],
+                    "title": "Error Rate %",
+                    "type": "gauge"
+                  },
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "color": {"mode": "palette-classic"},
+                        "custom": {
+                          "axisLabel": "Response Time (ms)",
+                          "axisPlacement": "auto",
+                          "barAlignment": 0,
+                          "drawStyle": "line",
+                          "fillOpacity": 10,
+                          "gradientMode": "none",
+                          "lineInterpolation": "smooth",
+                          "lineWidth": 2,
+                          "pointSize": 5,
+                          "showPoints": "never",
+                          "spanNulls": true
+                        },
+                        "mappings": [],
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+                        "unit": "ms"
+                      }
+                    },
+                    "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+                    "id": 4,
+                    "options": {
+                      "legend": {"calcs": ["mean", "max", "last"], "displayMode": "table", "placement": "bottom"},
+                      "tooltip": {"mode": "multi"}
+                    },
+                    "targets": [
+                      {
+                        "expr": "locust_requests_avg_response_time",
+                        "legendFormat": "{{ name }} - avg",
+                        "refId": "A"
+                      },
+                      {
+                        "expr": "locust_requests_max_response_time",
+                        "legendFormat": "{{ name }} - max",
+                        "refId": "B"
+                      },
+                      {
+                        "expr": "locust_requests_min_response_time",
+                        "legendFormat": "{{ name }} - min",
+                        "refId": "C"
+                      }
+                    ],
+                    "title": "Response Times",
+                    "type": "timeseries"
+                  },
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "color": {"mode": "palette-classic"},
+                        "custom": {
+                          "axisLabel": "Users",
+                          "axisPlacement": "auto",
+                          "barAlignment": 0,
+                          "drawStyle": "line",
+                          "fillOpacity": 20,
+                          "gradientMode": "none",
+                          "lineInterpolation": "smooth",
+                          "lineWidth": 2,
+                          "pointSize": 5,
+                          "showPoints": "never",
+                          "spanNulls": true
+                        },
+                        "mappings": [],
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+                        "unit": "short"
+                      }
+                    },
+                    "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+                    "id": 5,
+                    "options": {
+                      "legend": {"calcs": ["mean", "max", "last"], "displayMode": "table", "placement": "bottom"},
+                      "tooltip": {"mode": "multi"}
+                    },
+                    "targets": [
+                      {
+                        "expr": "locust_users",
+                        "legendFormat": "Active Users",
+                        "refId": "A"
+                      },
+                      {
+                        "expr": "count(kube_pod_status_phase{namespace=\"${{ env.LOCUST_NAMESPACE }}\", pod=~\"locust-worker-.*\", phase=\"Running\"})",
+                        "legendFormat": "Worker Pods",
+                        "refId": "B"
+                      }
+                    ],
+                    "title": "Active Users & Workers",
+                    "type": "timeseries"
+                  }
+                ],
+                "refresh": "10s",
+                "schemaVersion": 38,
+                "style": "dark",
+                "tags": ["locust", "load-testing"],
+                "templating": {"list": []},
+                "time": {"from": "now-1h", "to": "now"},
+                "timepicker": {},
+                "timezone": "browser",
+                "title": "Locust Load Testing Dashboard",
+                "uid": "locust-load-testing",
+                "version": 1
+              }
+          EOF
+          echo "Locust Grafana dashboard ConfigMap created"
+
+      # -----------------------------------------------------------------------
+      # Health Checks
+      # -----------------------------------------------------------------------
+      - name: Wait for Prometheus to be ready
+        if: ${{ !inputs.skip-health-checks }}
+        run: |
+          echo "Waiting for Prometheus to be ready..."
+          kubectl wait --for=condition=Ready \
+            pod -l app.kubernetes.io/name=prometheus \
+            -n ${{ env.MONITORING_NAMESPACE }} \
+            --timeout=10m
+
+          echo "Prometheus is ready"
+
+      - name: Wait for Grafana to be ready
+        if: ${{ !inputs.skip-health-checks }}
+        run: |
+          echo "Waiting for Grafana to be ready..."
+          kubectl wait --for=condition=Ready \
+            pod -l app.kubernetes.io/name=grafana \
+            -n ${{ env.MONITORING_NAMESPACE }} \
+            --timeout=10m
+
+          echo "Grafana is ready"
+
+      - name: Verify Prometheus targets
+        if: ${{ !inputs.skip-health-checks }}
+        run: |
+          echo "Verifying Prometheus is scraping targets..."
+
+          # Port-forward Prometheus
+          kubectl port-forward -n ${{ env.MONITORING_NAMESPACE }} \
+            svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+          PF_PID=$!
+          sleep 10
+
+          # Check Prometheus health
+          HEALTH=$(curl -s http://localhost:9090/-/healthy)
+          if [ "$HEALTH" != "Prometheus is Healthy." ]; then
+            echo "ERROR: Prometheus health check failed"
+            kill $PF_PID
+            exit 1
+          fi
+          echo "Prometheus health check passed"
+
+          # Check targets
+          TARGETS=$(curl -s http://localhost:9090/api/v1/targets | jq -r '.data.activeTargets | length')
+          echo "Active Prometheus targets: $TARGETS"
+
+          kill $PF_PID
+          echo "Prometheus targets verified"
+
+      # -----------------------------------------------------------------------
+      # Display Access Information
+      # -----------------------------------------------------------------------
+      - name: Display access information
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "  MONITORING STACK DEPLOYMENT COMPLETE"
+          echo "============================================================"
+          echo ""
+          echo "PROMETHEUS:"
+          echo "  Service: prometheus-kube-prometheus-prometheus"
+          echo "  Namespace: ${{ env.MONITORING_NAMESPACE }}"
+          echo "  Port-forward command:"
+          echo "    kubectl port-forward -n ${{ env.MONITORING_NAMESPACE }} svc/prometheus-kube-prometheus-prometheus 9090:9090"
+          echo "  Access URL: http://localhost:9090"
+          echo ""
+          echo "GRAFANA:"
+          echo "  Service: prometheus-kube-prometheus-grafana"
+          echo "  Namespace: ${{ env.MONITORING_NAMESPACE }}"
+          echo "  Port-forward command:"
+          echo "    kubectl port-forward -n ${{ env.MONITORING_NAMESPACE }} svc/prometheus-kube-prometheus-grafana 3000:80"
+          echo "  Access URL: http://localhost:3000"
+          echo "  Username: admin"
+          echo "  Password: [Set via GRAFANA_ADMIN_PASSWORD secret or workflow input]"
+          echo ""
+          echo "ALERTMANAGER:"
+          echo "  Service: prometheus-kube-prometheus-alertmanager"
+          echo "  Namespace: ${{ env.MONITORING_NAMESPACE }}"
+          echo "  Port-forward command:"
+          echo "    kubectl port-forward -n ${{ env.MONITORING_NAMESPACE }} svc/prometheus-kube-prometheus-alertmanager 9093:9093"
+          echo "  Access URL: http://localhost:9093"
+          echo ""
+          echo "NEXT STEPS:"
+          echo "  1. Set up port-forwarding using the commands above"
+          echo "  2. Access Grafana and explore the Locust dashboard"
+          echo "  3. Configure AlertManager receivers (email, Slack, etc.)"
+          echo "  4. Review Prometheus targets: http://localhost:9090/targets"
+          echo ""
+          echo "MONITORING COMPONENTS:"
+          kubectl get pods -n ${{ env.MONITORING_NAMESPACE }}
+          echo ""
+          echo "SERVICEMONITORS:"
+          kubectl get servicemonitors -n ${{ env.LOCUST_NAMESPACE }}
+          echo ""
+          echo "PROMETHEUS RULES:"
+          kubectl get prometheusrules -n ${{ env.MONITORING_NAMESPACE }}
+          echo ""
+          echo "============================================================"
+
+      # -----------------------------------------------------------------------
+      # Create LoadBalancer Service (Optional)
+      # -----------------------------------------------------------------------
+      - name: Expose Grafana via LoadBalancer (optional)
+        continue-on-error: true
+        run: |
+          echo "Creating LoadBalancer service for Grafana..."
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: grafana-loadbalancer
+            namespace: ${{ env.MONITORING_NAMESPACE }}
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+          spec:
+            type: LoadBalancer
+            selector:
+              app.kubernetes.io/name: grafana
+            ports:
+              - port: 80
+                targetPort: 3000
+                protocol: TCP
+                name: http
+          EOF
+
+          echo "Waiting for LoadBalancer IP..."
+          sleep 30
+
+          LB_HOSTNAME=$(kubectl get svc grafana-loadbalancer -n ${{ env.MONITORING_NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+          if [ -n "$LB_HOSTNAME" ]; then
+            echo ""
+            echo "Grafana LoadBalancer URL: http://$LB_HOSTNAME"
+            echo ""
+            echo "WARNING: This exposes Grafana publicly. Ensure you:"
+            echo "  - Change the default admin password"
+            echo "  - Configure HTTPS/TLS"
+            echo "  - Set up authentication (OAuth, LDAP, etc.)"
+            echo "  - Apply network security rules"
+          else
+            echo "LoadBalancer IP not yet assigned (may take 2-3 minutes)"
+            echo "Check status: kubectl get svc grafana-loadbalancer -n ${{ env.MONITORING_NAMESPACE }}"
+          fi
+
+  # =========================================================================
+  # Validation Job (runs after deployment)
+  # =========================================================================
+  validate-monitoring:
+    name: Validate Monitoring Stack
+    runs-on: ubuntu-latest
+    needs: deploy-monitoring
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup prerequisites
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ inputs.aws-region }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          cluster-name: ${{ inputs.cluster-name }}
+
+      - name: Validate Prometheus deployment
+        run: |
+          echo "Validating Prometheus deployment..."
+
+          # Check StatefulSet
+          REPLICAS=$(kubectl get statefulset prometheus-prometheus-kube-prometheus-prometheus \
+            -n ${{ env.MONITORING_NAMESPACE }} \
+            -o jsonpath='{.status.readyReplicas}')
+
+          if [ "$REPLICAS" -lt 1 ]; then
+            echo "ERROR: Prometheus StatefulSet not ready"
+            exit 1
+          fi
+          echo "Prometheus StatefulSet ready with $REPLICAS replicas"
+
+      - name: Validate Grafana deployment
+        run: |
+          echo "Validating Grafana deployment..."
+
+          # Check Deployment
+          REPLICAS=$(kubectl get deployment prometheus-kube-prometheus-grafana \
+            -n ${{ env.MONITORING_NAMESPACE }} \
+            -o jsonpath='{.status.readyReplicas}')
+
+          if [ "$REPLICAS" -lt 1 ]; then
+            echo "ERROR: Grafana Deployment not ready"
+            exit 1
+          fi
+          echo "Grafana Deployment ready with $REPLICAS replicas"
+
+      - name: Validate ServiceMonitors
+        run: |
+          echo "Validating ServiceMonitors..."
+
+          # Check if ServiceMonitor exists
+          SM_COUNT=$(kubectl get servicemonitors -n ${{ env.LOCUST_NAMESPACE }} \
+            -o json | jq '.items | length')
+
+          echo "Found $SM_COUNT ServiceMonitor(s) in ${{ env.LOCUST_NAMESPACE }} namespace"
+
+          if [ "$SM_COUNT" -eq 0 ]; then
+            echo "WARNING: No ServiceMonitors found for Locust"
+          fi
+
+      - name: Validate PrometheusRules
+        run: |
+          echo "Validating PrometheusRules..."
+
+          # Check if PrometheusRule exists
+          PR_COUNT=$(kubectl get prometheusrules -n ${{ env.MONITORING_NAMESPACE }} \
+            -l prometheus=kube-prometheus \
+            -o json | jq '.items | length')
+
+          echo "Found $PR_COUNT PrometheusRule(s)"
+
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "WARNING: No PrometheusRules found"
+          fi
+
+      - name: Final validation summary
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "  VALIDATION COMPLETE"
+          echo "============================================================"
+          echo ""
+          echo "All monitoring components validated successfully"
+          echo ""
+          echo "Monitoring Stack Status:"
+          kubectl get all -n ${{ env.MONITORING_NAMESPACE }}

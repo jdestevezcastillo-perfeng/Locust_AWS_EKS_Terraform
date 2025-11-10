@@ -7,8 +7,16 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../" && pwd)"
 source "${PROJECT_ROOT}/scripts/lib/colors.sh"
 source "${PROJECT_ROOT}/scripts/lib/common.sh"
 
-AWS_REGION=${AWS_REGION:-eu-central-1}
-ECR_REPOSITORY="locust-load-tests"
+# Load deployment environment for repository metadata
+if [ -f "${PROJECT_ROOT}/.env.deployment" ]; then
+    source "${PROJECT_ROOT}/.env.deployment"
+fi
+
+AWS_REGION=${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "eu-central-1")}
+ECR_REPOSITORY=${ECR_REPOSITORY_URL##*/}  # fall back to repo name from URL
+if [ -z "$ECR_REPOSITORY" ]; then
+    ECR_REPOSITORY="locust-load-tests"
+fi
 
 print_header "Phase 2: Deleting ECR Images"
 

@@ -13,30 +13,37 @@ if [ -f "${PROJECT_ROOT}/.env.deployment" ]; then
 fi
 
 ECR_REPOSITORY_URL=${ECR_REPOSITORY_URL:-$(get_tf_output "ecr_repository_url")}
+IMAGE_TAG=${IMAGE_TAG:-latest}
+LOCUST_IMAGE="${ECR_REPOSITORY_URL}:${IMAGE_TAG}"
+
+TMP_MANIFEST_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_MANIFEST_DIR"' EXIT
 
 print_header "Phase 5: Deploying Locust to Kubernetes"
 
 print_section "Preparing Kubernetes Manifests"
-print_step "Updating manifests with ECR repository URL..."
+print_step "Rendering manifests with image ${LOCUST_IMAGE}..."
 for manifest in "${PROJECT_ROOT}/kubernetes/base"/*.yaml; do
-    sed -i "s|<ECR_REPO_URL>|${ECR_REPOSITORY_URL}|g" "$manifest" || true
-    sed -i "s|locust-docker-image:latest|${ECR_REPOSITORY_URL}:latest|g" "$manifest" || true
+    manifest_name=$(basename "$manifest")
+    sed "s|__LOCUST_IMAGE__|${LOCUST_IMAGE}|g" "$manifest" > "${TMP_MANIFEST_DIR}/${manifest_name}"
 done
 print_success "Manifests updated"
 
+APPLY_DIR="$TMP_MANIFEST_DIR"
+
 print_section "Creating Kubernetes Namespace"
 print_step "Applying namespace.yaml..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/namespace.yaml" || error_exit "Failed to create namespace"
+kubectl apply -f "${APPLY_DIR}/namespace.yaml" || error_exit "Failed to create namespace"
 print_success "Namespace created"
 
 print_section "Creating ConfigMap"
 print_step "Applying configmap.yaml..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/configmap.yaml" || error_exit "Failed to create configmap"
+kubectl apply -f "${APPLY_DIR}/configmap.yaml" || error_exit "Failed to create configmap"
 print_success "ConfigMap created"
 
 print_section "Deploying Locust Master"
 print_step "Applying master-deployment.yaml..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/master-deployment.yaml" || error_exit "Failed to deploy master"
+kubectl apply -f "${APPLY_DIR}/master-deployment.yaml" || error_exit "Failed to deploy master"
 print_success "Master deployment created"
 
 print_step "Waiting for master pod to be ready (timeout: 5 minutes)..."
@@ -45,12 +52,16 @@ print_success "Master pod is ready"
 
 print_section "Creating Locust Master Service"
 print_step "Applying master-service.yaml..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/master-service.yaml" || error_exit "Failed to create service"
+kubectl apply -f "${APPLY_DIR}/master-service.yaml" || error_exit "Failed to create service"
 print_success "Master service created"
+
+print_step "Applying master-internal-service.yaml..."
+kubectl apply -f "${APPLY_DIR}/master-internal-service.yaml" || error_exit "Failed to create internal service"
+print_success "Internal master service created"
 
 print_section "Deploying Locust Workers"
 print_step "Applying worker-deployment.yaml..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/worker-deployment.yaml" || error_exit "Failed to deploy workers"
+kubectl apply -f "${APPLY_DIR}/worker-deployment.yaml" || error_exit "Failed to deploy workers"
 print_success "Worker deployment created"
 
 print_step "Waiting for worker pods to be ready (timeout: 5 minutes)..."
@@ -59,7 +70,7 @@ print_success "Worker pods are ready"
 
 print_section "Configuring Auto-scaling"
 print_step "Applying HPA configuration..."
-kubectl apply -f "${PROJECT_ROOT}/kubernetes/base/worker-hpa.yaml" || error_exit "Failed to apply HPA"
+kubectl apply -f "${APPLY_DIR}/worker-hpa.yaml" || error_exit "Failed to apply HPA"
 print_success "Horizontal Pod Autoscaler configured"
 
 print_section "Waiting for LoadBalancer IP"

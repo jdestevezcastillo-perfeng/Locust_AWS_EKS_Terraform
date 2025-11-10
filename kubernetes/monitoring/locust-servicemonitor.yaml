@@ -2,14 +2,18 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: locust
-  namespace: locust
+  namespace: monitoring
   labels:
     app: locust
     release: prometheus-grafana
 spec:
+  namespaceSelector:
+    matchNames:
+      - locust
   selector:
     matchLabels:
       app: locust
+      component: master
   endpoints:
   - port: prometheus
     path: /metrics

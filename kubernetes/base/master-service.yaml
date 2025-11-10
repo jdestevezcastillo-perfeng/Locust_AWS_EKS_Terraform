@@ -16,10 +16,6 @@ spec:
     targetPort: 8089
     protocol: TCP
     name: web-ui
-  - port: 5557
-    targetPort: 5557
-    protocol: TCP
-    name: master-communication
   - port: 8090
     targetPort: 8090
     protocol: TCP

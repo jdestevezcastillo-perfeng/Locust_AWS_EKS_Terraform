@@ -37,11 +37,37 @@ source "${PROJECT_ROOT}/scripts/lib/common.sh"
 # Parse arguments
 ENVIRONMENT=${1:-dev}
 IMAGE_TAG=${2:-latest}
+export IMAGE_TAG
+export ENVIRONMENT
 
 # Display banner
 clear
 print_header "LOCUST ON AWS EKS - COMPLETE DEPLOYMENT"
 echo ""
+
+# Load per-environment Terraform configuration
+if ! load_environment_config "$ENVIRONMENT"; then
+    error_exit "Environment '${ENVIRONMENT}' is not configured. See config/environments/*"
+fi
+
+prompt_for_api_cidrs() {
+    local input=""
+    while true; do
+        read -r -p "Enter comma-separated CIDR(s) allowed to reach the EKS API (e.g., 203.0.113.24/32): " input
+        local normalized="$(echo "$input" | tr -d ' ')"
+        if [ -z "$normalized" ]; then
+            print_warning "At least one CIDR is required."
+            continue
+        fi
+
+        if echo "$normalized" | grep -Eq '(^|,)0\.0\.0\.0/0(,|$)' && [ "${ALLOW_INSECURE_ENDPOINT:-false}" != "true" ]; then
+            print_warning "Refusing to allow 0.0.0.0/0. Set ALLOW_INSECURE_ENDPOINT=true to override."
+            continue
+        fi
+        echo "$normalized"
+        return 0
+    done
+}
 
 # Interactive AWS Region Selection
 print_section "AWS Configuration"
@@ -97,7 +123,25 @@ export TF_VAR_aws_region="$AWS_REGION"
 
 print_info "Environment: $ENVIRONMENT"
 print_info "Image Tag: $IMAGE_TAG"
+print_info "Environment config file: ${TF_VAR_FILE}"
 print_info "Project Root: $PROJECT_ROOT"
+echo ""
+
+# Determine allowed CIDRs for the EKS API server
+API_CIDRS_INPUT="${EKS_API_ALLOWED_CIDRS:-}"
+if [ -z "$API_CIDRS_INPUT" ]; then
+    print_section "API Server Access Control"
+    print_info "Provide your office/VPN CIDR (comma separated for multiple entries)."
+    API_CIDRS_INPUT="$(prompt_for_api_cidrs)"
+fi
+
+CIDR_JSON=$(format_cidrs_to_json "$API_CIDRS_INPUT")
+if [ -z "$CIDR_JSON" ]; then
+    error_exit "Unable to parse CIDR list."
+fi
+
+export TF_VAR_cluster_endpoint_public_access_cidrs="$CIDR_JSON"
+print_success "EKS API access restricted to: $CIDR_JSON"
 echo ""
 
 # Record start time

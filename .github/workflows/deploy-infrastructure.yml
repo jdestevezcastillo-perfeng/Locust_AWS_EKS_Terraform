@@ -1,0 +1,617 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: 'dev'
+      terraform-action:
+        description: 'Terraform action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: 'plan'
+      auto-approve:
+        description: 'Auto-approve Terraform apply (use with caution)'
+        required: false
+        type: boolean
+        default: false
+
+  # Optional: trigger on push to main for specific paths
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - 'terraform/**'
+  #     - '.github/workflows/deploy-infrastructure.yml'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-central-1' }}
+  TF_VERSION: '1.9.0'
+  KUBECTL_VERSION: '1.31.0'
+  TERRAFORM_DIR: './terraform'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Validate and Plan Infrastructure
+  # ---------------------------------------------------------------------------
+  validate-and-plan:
+    name: Validate & Plan Terraform
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    outputs:
+      terraform-plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      cluster-name: ${{ steps.tf-outputs.outputs.cluster_name }}
+      ecr-url: ${{ steps.tf-outputs.outputs.ecr_url }}
+      aws-region: ${{ steps.tf-outputs.outputs.aws_region }}
+      plan-summary: ${{ steps.plan-summary.outputs.summary }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout and Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Prerequisites
+        id: setup-prereqs
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TF_VERSION }}
+          kubectl-version: ${{ env.KUBECTL_VERSION }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Display Prerequisites Status
+        run: |
+          echo "Prerequisites Setup Complete:"
+          echo "  Terraform: ${{ steps.setup-prereqs.outputs.terraform-version }}"
+          echo "  AWS CLI: ${{ steps.setup-prereqs.outputs.aws-cli-version }}"
+          echo "  kubectl: ${{ steps.setup-prereqs.outputs.kubectl-version }}"
+          echo "  AWS Account: ${{ steps.setup-prereqs.outputs.aws-account-id }}"
+          echo "  AWS User: ${{ steps.setup-prereqs.outputs.aws-user }}"
+          echo "  Region: ${{ env.AWS_REGION }}"
+          echo "  Environment: ${{ github.event.inputs.environment || 'dev' }}"
+
+      # -----------------------------------------------------------------------
+      # Terraform Backend Configuration
+      # -----------------------------------------------------------------------
+      - name: Configure Terraform Backend
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Configuring Terraform S3 backend..."
+
+          # Create backend configuration file
+          cat > backend.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket         = "${{ secrets.TF_STATE_BUCKET }}"
+              key            = "locust-eks/${{ github.event.inputs.environment || 'dev' }}/terraform.tfstate"
+              region         = "${{ env.AWS_REGION }}"
+              encrypt        = true
+              dynamodb_table = "${{ secrets.TF_STATE_LOCK_TABLE }}"
+
+              # Optional: Enable state locking and versioning
+              # versioning     = true
+            }
+          }
+          EOF
+
+          echo "Backend configuration created"
+          cat backend.tf
+
+      # -----------------------------------------------------------------------
+      # Terraform Initialization
+      # -----------------------------------------------------------------------
+      - name: Terraform Format Check
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Initialize
+        id: init
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Initializing Terraform..."
+          terraform init -upgrade \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=locust-eks/${{ github.event.inputs.environment || 'dev' }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Validating Terraform configuration..."
+          terraform validate -no-color
+
+      # -----------------------------------------------------------------------
+      # Terraform Planning
+      # -----------------------------------------------------------------------
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Running Terraform plan..."
+
+          # Set environment-specific variables
+          export TF_VAR_environment="${{ github.event.inputs.environment || 'dev' }}"
+          export TF_VAR_aws_region="${{ env.AWS_REGION }}"
+
+          # Run plan with appropriate action
+          if [ "${{ github.event.inputs.terraform-action }}" == "destroy" ]; then
+            terraform plan -destroy -out=tfplan -detailed-exitcode || EXIT_CODE=$?
+          else
+            terraform plan -out=tfplan -detailed-exitcode || EXIT_CODE=$?
+          fi
+
+          # Capture exit code
+          # 0 = No changes, 1 = Error, 2 = Changes present
+          echo "exitcode=${EXIT_CODE:-0}" >> $GITHUB_OUTPUT
+
+          # Exit with 0 unless there was an actual error
+          if [ "${EXIT_CODE:-0}" == "1" ]; then
+            exit 1
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        continue-on-error: false
+
+      - name: Generate Plan Summary
+        id: plan-summary
+        if: always() && steps.plan.outcome != 'failure'
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Generating plan summary..."
+
+          # Show plan in human-readable format
+          terraform show -no-color tfplan > plan_output.txt
+
+          # Create summary
+          SUMMARY=$(cat <<EOF
+          ## Terraform Plan Summary
+
+          **Environment:** ${{ github.event.inputs.environment || 'dev' }}
+          **Action:** ${{ github.event.inputs.terraform-action }}
+          **Region:** ${{ env.AWS_REGION }}
+          **Exit Code:** ${{ steps.plan.outputs.exitcode }}
+
+          **Status:**
+          - Exit code 0: No changes needed
+          - Exit code 2: Changes detected
+
+          <details>
+          <summary>View Plan Details</summary>
+
+          \`\`\`
+          $(cat plan_output.txt | tail -n 100)
+          \`\`\`
+
+          </details>
+          EOF
+          )
+
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Comment Plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const summary = `${{ steps.plan-summary.outputs.summary }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      # -----------------------------------------------------------------------
+      # Upload Plan Artifact
+      # -----------------------------------------------------------------------
+      - name: Upload Terraform Plan
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.event.inputs.environment || 'dev' }}
+          path: ${{ env.TERRAFORM_DIR }}/tfplan
+          retention-days: 5
+
+      # -----------------------------------------------------------------------
+      # Get Current Terraform Outputs (if state exists)
+      # -----------------------------------------------------------------------
+      - name: Get Terraform Outputs
+        id: tf-outputs
+        if: github.event.inputs.terraform-action != 'destroy'
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        continue-on-error: true
+        run: |
+          # Try to get outputs from existing state
+          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "not-deployed")
+          ECR_URL=$(terraform output -raw ecr_repository_url 2>/dev/null || echo "not-deployed")
+          AWS_REGION=$(terraform output -raw aws_region 2>/dev/null || echo "${{ env.AWS_REGION }}")
+
+          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+          echo "ecr_url=${ECR_URL}" >> $GITHUB_OUTPUT
+          echo "aws_region=${AWS_REGION}" >> $GITHUB_OUTPUT
+
+          echo "Current Infrastructure Outputs:"
+          echo "  Cluster: ${CLUSTER_NAME}"
+          echo "  ECR: ${ECR_URL}"
+          echo "  Region: ${AWS_REGION}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Apply Infrastructure Changes
+  # ---------------------------------------------------------------------------
+  apply-infrastructure:
+    name: Apply Terraform Changes
+    runs-on: ubuntu-latest
+    needs: validate-and-plan
+    if: |
+      github.event.inputs.terraform-action == 'apply' ||
+      github.event.inputs.terraform-action == 'destroy'
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+      url: ${{ steps.get-urls.outputs.locust_url }}
+
+    outputs:
+      cluster-name: ${{ steps.apply-outputs.outputs.cluster_name }}
+      cluster-endpoint: ${{ steps.apply-outputs.outputs.cluster_endpoint }}
+      ecr-url: ${{ steps.apply-outputs.outputs.ecr_url }}
+      aws-region: ${{ steps.apply-outputs.outputs.aws_region }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout and Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Prerequisites
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TF_VERSION }}
+          kubectl-version: ${{ env.KUBECTL_VERSION }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Restore Terraform Plan
+      # -----------------------------------------------------------------------
+      - name: Download Terraform Plan
+        if: needs.validate-and-plan.outputs.terraform-plan-exitcode == '2'
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ github.event.inputs.environment || 'dev' }}
+          path: ${{ env.TERRAFORM_DIR }}
+
+      # -----------------------------------------------------------------------
+      # Terraform Re-initialization
+      # -----------------------------------------------------------------------
+      - name: Configure Terraform Backend
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          cat > backend.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket         = "${{ secrets.TF_STATE_BUCKET }}"
+              key            = "locust-eks/${{ github.event.inputs.environment || 'dev' }}/terraform.tfstate"
+              region         = "${{ env.AWS_REGION }}"
+              encrypt        = true
+              dynamodb_table = "${{ secrets.TF_STATE_LOCK_TABLE }}"
+            }
+          }
+          EOF
+
+      - name: Terraform Initialize
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          terraform init -upgrade \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=locust-eks/${{ github.event.inputs.environment || 'dev' }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Terraform Apply/Destroy
+      # -----------------------------------------------------------------------
+      - name: Terraform Apply
+        id: apply
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          export TF_VAR_environment="${{ github.event.inputs.environment || 'dev' }}"
+          export TF_VAR_aws_region="${{ env.AWS_REGION }}"
+
+          echo "Applying Terraform changes..."
+          echo "Action: ${{ github.event.inputs.terraform-action }}"
+          echo "Environment: ${{ github.event.inputs.environment || 'dev' }}"
+          echo "Auto-approve: ${{ github.event.inputs.auto-approve }}"
+
+          # Apply or destroy based on input
+          if [ "${{ github.event.inputs.auto-approve }}" == "true" ]; then
+            if [ -f "tfplan" ]; then
+              # Use saved plan
+              terraform apply tfplan
+            else
+              # Direct apply/destroy with auto-approve
+              if [ "${{ github.event.inputs.terraform-action }}" == "destroy" ]; then
+                terraform destroy -auto-approve
+              else
+                terraform apply -auto-approve
+              fi
+            fi
+          else
+            echo "ERROR: Auto-approve must be enabled for workflow execution"
+            echo "Please set auto-approve to true or run terraform locally"
+            exit 1
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Capture Terraform Outputs
+      # -----------------------------------------------------------------------
+      - name: Capture Terraform Outputs
+        id: apply-outputs
+        if: github.event.inputs.terraform-action != 'destroy'
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          echo "Capturing Terraform outputs..."
+
+          CLUSTER_NAME=$(terraform output -raw cluster_name)
+          CLUSTER_ENDPOINT=$(terraform output -raw cluster_endpoint)
+          ECR_URL=$(terraform output -raw ecr_repository_url)
+          AWS_REGION=$(terraform output -raw aws_region)
+
+          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+          echo "cluster_endpoint=${CLUSTER_ENDPOINT}" >> $GITHUB_OUTPUT
+          echo "ecr_url=${ECR_URL}" >> $GITHUB_OUTPUT
+          echo "aws_region=${AWS_REGION}" >> $GITHUB_OUTPUT
+
+          # Save to environment file for potential use
+          cat > deployment.env <<EOF
+          CLUSTER_NAME=${CLUSTER_NAME}
+          CLUSTER_ENDPOINT=${CLUSTER_ENDPOINT}
+          ECR_REPOSITORY_URL=${ECR_URL}
+          AWS_REGION=${AWS_REGION}
+          EOF
+
+          echo "Infrastructure Outputs:"
+          echo "  Cluster Name: ${CLUSTER_NAME}"
+          echo "  Cluster Endpoint: ${CLUSTER_ENDPOINT}"
+          echo "  ECR URL: ${ECR_URL}"
+          echo "  AWS Region: ${AWS_REGION}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Upload Deployment Environment
+        if: github.event.inputs.terraform-action != 'destroy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-env-${{ github.event.inputs.environment || 'dev' }}
+          path: ${{ env.TERRAFORM_DIR }}/deployment.env
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Configure kubectl and Verify Cluster
+  # ---------------------------------------------------------------------------
+  configure-kubectl:
+    name: Configure kubectl Access
+    runs-on: ubuntu-latest
+    needs: apply-infrastructure
+    if: |
+      github.event.inputs.terraform-action == 'apply' &&
+      needs.apply-infrastructure.outputs.cluster-name != ''
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout and Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Prerequisites
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TF_VERSION }}
+          kubectl-version: ${{ env.KUBECTL_VERSION }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Configure kubectl
+      # -----------------------------------------------------------------------
+      - name: Update kubeconfig
+        run: |
+          echo "Configuring kubectl for EKS cluster..."
+
+          CLUSTER_NAME="${{ needs.apply-infrastructure.outputs.cluster-name }}"
+          AWS_REGION="${{ needs.apply-infrastructure.outputs.aws-region }}"
+
+          echo "Cluster: ${CLUSTER_NAME}"
+          echo "Region: ${AWS_REGION}"
+
+          aws eks update-kubeconfig \
+            --name "${CLUSTER_NAME}" \
+            --region "${AWS_REGION}" \
+            --alias "locust-${CLUSTER_NAME}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Verify Cluster Connection
+        run: |
+          echo "Verifying cluster connection..."
+
+          # Test connection
+          kubectl cluster-info
+
+          echo ""
+          echo "Cluster nodes:"
+          kubectl get nodes
+
+          echo ""
+          echo "Cluster version:"
+          kubectl version --short
+
+      - name: Wait for Nodes to be Ready
+        run: |
+          echo "Waiting for nodes to be ready..."
+
+          # Wait up to 5 minutes for at least one node to be ready
+          timeout=300
+          interval=10
+          elapsed=0
+
+          while [ $elapsed -lt $timeout ]; do
+            READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c 'Ready' || echo "0")
+
+            if [ "$READY_NODES" -gt 0 ]; then
+              echo "Nodes are ready (${READY_NODES} node(s))"
+              kubectl get nodes
+              exit 0
+            fi
+
+            echo "Waiting for nodes... (${elapsed}s/${timeout}s)"
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+
+          echo "ERROR: Nodes did not become ready within ${timeout} seconds"
+          kubectl get nodes
+          exit 1
+
+      - name: Display Cluster Status
+        if: always()
+        run: |
+          echo "=== Cluster Status ==="
+          echo ""
+
+          echo "Nodes:"
+          kubectl get nodes -o wide || true
+
+          echo ""
+          echo "Namespaces:"
+          kubectl get namespaces || true
+
+          echo ""
+          echo "System Pods:"
+          kubectl get pods -n kube-system || true
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Summary and Notification
+  # ---------------------------------------------------------------------------
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [validate-and-plan, apply-infrastructure, configure-kubectl]
+    if: always()
+
+    steps:
+      - name: Generate Deployment Summary
+        run: |
+          cat <<EOF
+          # Deployment Summary
+
+          ## Configuration
+          - **Environment:** ${{ github.event.inputs.environment || 'dev' }}
+          - **Action:** ${{ github.event.inputs.terraform-action }}
+          - **Region:** ${{ env.AWS_REGION }}
+          - **Triggered by:** ${{ github.actor }}
+
+          ## Job Status
+          - **Validate & Plan:** ${{ needs.validate-and-plan.result }}
+          - **Apply Infrastructure:** ${{ needs.apply-infrastructure.result }}
+          - **Configure kubectl:** ${{ needs.configure-kubectl.result }}
+
+          ## Infrastructure Details
+          - **Cluster Name:** ${{ needs.apply-infrastructure.outputs.cluster-name || 'N/A' }}
+          - **Cluster Endpoint:** ${{ needs.apply-infrastructure.outputs.cluster-endpoint || 'N/A' }}
+          - **ECR Repository:** ${{ needs.apply-infrastructure.outputs.ecr-url || 'N/A' }}
+          - **AWS Region:** ${{ needs.apply-infrastructure.outputs.aws-region || env.AWS_REGION }}
+
+          ## Next Steps
+          EOF
+
+          if [ "${{ needs.apply-infrastructure.result }}" == "success" ] && [ "${{ github.event.inputs.terraform-action }}" == "apply" ]; then
+            cat <<EOF
+
+          The infrastructure has been deployed successfully!
+
+          ### Access the Cluster
+          \`\`\`bash
+          aws eks update-kubeconfig --name ${{ needs.apply-infrastructure.outputs.cluster-name }} --region ${{ needs.apply-infrastructure.outputs.aws-region }}
+          kubectl get nodes
+          \`\`\`
+
+          ### Next Deployment Steps
+          1. Build and push Docker image to ECR
+          2. Deploy Locust to Kubernetes
+          3. Access the Locust web UI
+
+          EOF
+          fi
+
+          if [ "${{ needs.validate-and-plan.result }}" == "success" ] && [ "${{ github.event.inputs.terraform-action }}" == "plan" ]; then
+            cat <<EOF
+
+          Terraform plan completed successfully!
+
+          ### To Apply Changes
+          Run this workflow again with:
+          - Action: apply
+          - Auto-approve: true
+
+          EOF
+          fi
+
+      - name: Deployment Failed Notification
+        if: |
+          needs.apply-infrastructure.result == 'failure' ||
+          needs.configure-kubectl.result == 'failure'
+        run: |
+          echo "ERROR: Deployment failed!"
+          echo "Please check the workflow logs for details."
+          exit 1

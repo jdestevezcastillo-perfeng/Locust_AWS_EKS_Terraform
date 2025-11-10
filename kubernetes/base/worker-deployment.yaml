@@ -17,11 +17,15 @@ spec:
       labels:
         app: locust
         component: worker
+        prometheus: enabled
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
       - name: locust
-        # This will be updated by deployment script with actual ECR URL
-        image: 649370233800.dkr.ecr.eu-central-1.amazonaws.com/locust-load-tests:latest
+        image: __LOCUST_IMAGE__
         imagePullPolicy: Always
         ports:
         - containerPort: 8090
@@ -33,7 +37,7 @@ spec:
         - name: LOCUST_FILE
           value: "tests/locustfile.py"
         - name: MASTER_HOST
-          value: "locust-master"  # DNS name of master service
+          value: "locust-master-internal"  # DNS name of internal master service
         - name: TARGET_HOST
           valueFrom:
             configMapKeyRef:

@@ -95,6 +95,11 @@ cd /home/lostborion/Documents/veeam-extended
 # URL will be displayed at the end
 ```
 
+During deployment you will be asked to:
+- Select which environment config to use (`config/environments/{dev,staging,prod}/terraform.tfvars`)
+- Choose the AWS region
+- Provide the CIDR(s) that should be allowed to reach the EKS API server (no more `0.0.0.0/0` defaults)
+
 The deployment script will:
 - ✅ Validate AWS credentials
 - ✅ Ask you to select a region
@@ -142,8 +147,11 @@ veeam-extended/
 │       ├── configmap.yaml              # Test configuration
 │       ├── master-deployment.yaml      # Locust coordinator
 │       ├── master-service.yaml         # LoadBalancer service
+│       ├── master-internal-service.yaml# ClusterIP service for workers
 │       ├── worker-deployment.yaml      # Load generators
 │       └── worker-hpa.yaml             # Auto-scaling config
+│   └── monitoring/
+│       └── locust-servicemonitor.yaml  # Prometheus Operator integration
 │
 ├── tests/                              # Load test scenarios
 │   ├── locustfile.py                   # Test entry point
