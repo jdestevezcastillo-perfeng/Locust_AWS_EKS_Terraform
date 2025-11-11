@@ -343,73 +343,17 @@ jobs:
           kubectl cluster-info
           echo "kubectl configured successfully"
 
-      - name: Update Kubernetes Manifests
+      - name: Deploy Locust Stack
         run: |
           IMAGE_URI="${{ needs.build-push.outputs.image-uri }}"
-          echo "Updating manifests with image: ${IMAGE_URI}"
+          echo "Applying manifests with image ${IMAGE_URI}"
+          sed "s|__LOCUST_IMAGE__|${IMAGE_URI}|g" kubernetes/locust-stack.yaml | kubectl apply -f -
 
-          # Update image in deployment manifests
-          find kubernetes/base -name "*.yaml" -type f -exec sed -i "s|image:.*locust-load-tests.*|image: ${IMAGE_URI}|g" {} \;
-
-          echo "Manifests updated successfully"
-
-      - name: Apply Namespace
-        run: |
-          echo "Creating/updating namespace..."
-          kubectl apply -f kubernetes/base/namespace.yaml
-
-          # Verify namespace exists
-          kubectl get namespace locust
-          echo "Namespace ready"
-
-      - name: Apply ConfigMap
-        run: |
-          echo "Creating/updating ConfigMap..."
-          kubectl apply -f kubernetes/base/configmap.yaml
-
-          # Verify ConfigMap
-          kubectl get configmap locust-config -n locust
-          echo "ConfigMap ready"
-
-      - name: Deploy Locust Master
-        run: |
-          echo "Deploying Locust Master..."
-          kubectl apply -f kubernetes/base/master-deployment.yaml
-          kubectl apply -f kubernetes/base/master-service.yaml
-
-          echo "Waiting for master deployment to be ready..."
+          echo "Waiting for master deployment..."
           kubectl rollout status deployment/locust-master -n locust --timeout=300s
 
-          echo "Locust Master deployed successfully"
-
-      - name: Deploy Locust Workers
-        run: |
-          echo "Deploying Locust Workers..."
-          kubectl apply -f kubernetes/base/worker-deployment.yaml
-
-          echo "Waiting for worker deployment to be ready..."
+          echo "Waiting for worker deployment..."
           kubectl rollout status deployment/locust-worker -n locust --timeout=300s
-
-          echo "Locust Workers deployed successfully"
-
-      - name: Apply Horizontal Pod Autoscaler
-        run: |
-          echo "Configuring Horizontal Pod Autoscaler..."
-          kubectl apply -f kubernetes/base/worker-hpa.yaml
-
-          # Verify HPA
-          kubectl get hpa -n locust
-          echo "HPA configured successfully"
-
-      - name: Apply Service Monitor (if exists)
-        continue-on-error: true
-        run: |
-          if [ -f "kubernetes/base/locust-servicemonitor.yaml" ]; then
-            echo "Applying ServiceMonitor for Prometheus..."
-            kubectl apply -f kubernetes/base/locust-servicemonitor.yaml
-          else
-            echo "ServiceMonitor not found, skipping..."
-          fi
 
       - name: Verify Deployment
         run: |

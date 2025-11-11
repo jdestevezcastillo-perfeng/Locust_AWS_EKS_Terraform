@@ -322,9 +322,9 @@ jobs:
       - name: Deploy Locust ServiceMonitor
         run: |
           echo "Deploying Locust ServiceMonitor..."
-          if [ -f kubernetes/base/locust-servicemonitor.yaml ]; then
-            kubectl apply -f kubernetes/base/locust-servicemonitor.yaml
-            echo "Locust ServiceMonitor deployed from kubernetes/base/locust-servicemonitor.yaml"
+          if [ -f kubernetes/locust-servicemonitor.yaml ]; then
+            kubectl apply -f kubernetes/locust-servicemonitor.yaml
+            echo "Locust ServiceMonitor deployed from kubernetes/locust-servicemonitor.yaml"
           else
             echo "Creating Locust ServiceMonitor..."
             cat <<EOF | kubectl apply -f -

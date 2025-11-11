@@ -20,8 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source library functions
-source "${PROJECT_ROOT}/scripts/lib/colors.sh"
-source "${PROJECT_ROOT}/scripts/lib/common.sh"
+source "${PROJECT_ROOT}/scripts/common.sh"
 
 # Configuration
 NAMESPACE_MONITORING="monitoring"

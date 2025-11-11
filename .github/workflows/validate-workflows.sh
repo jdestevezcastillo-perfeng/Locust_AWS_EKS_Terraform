@@ -106,12 +106,7 @@ REQUIRED_FILES=(
     "terraform/main.tf"
     "terraform/variables.tf"
     "terraform/outputs.tf"
-    "kubernetes/base/namespace.yaml"
-    "kubernetes/base/configmap.yaml"
-    "kubernetes/base/master-deployment.yaml"
-    "kubernetes/base/master-service.yaml"
-    "kubernetes/base/worker-deployment.yaml"
-    "kubernetes/base/worker-hpa.yaml"
+    "kubernetes/locust-stack.yaml"
 )
 
 for file in "${REQUIRED_FILES[@]}"; do
@@ -130,14 +125,12 @@ print_header "Validating Kubernetes Manifests"
 
 # Check if kubectl is available
 if command -v kubectl &> /dev/null; then
-    for manifest in kubernetes/base/*.yaml; do
-        if kubectl apply --dry-run=client -f "$manifest" &>/dev/null; then
-            print_success "Valid K8s manifest: $(basename $manifest)"
-        else
-            print_error "Invalid K8s manifest: $(basename $manifest)"
-            ((VALIDATION_ERRORS++))
-        fi
-    done
+    if kubectl apply --dry-run=client -f kubernetes/locust-stack.yaml &>/dev/null; then
+        print_success "Valid K8s manifest: locust-stack.yaml"
+    else
+        print_error "Invalid K8s manifest: locust-stack.yaml"
+        ((VALIDATION_ERRORS++))
+    fi
 else
     print_warning "kubectl not installed - skipping K8s validation"
     print_info "Install from: https://kubernetes.io/docs/tasks/tools/"

@@ -59,6 +59,7 @@ kubernetes/*.yaml.bak
 # Temporary files
 *.tmp
 *.bak
+PRIVATE_OWNER_NOTES.md
 
 # AWS
 .aws/

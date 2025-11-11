@@ -28,8 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source library functions
-source "${PROJECT_ROOT}/scripts/lib/colors.sh"
-source "${PROJECT_ROOT}/scripts/lib/common.sh"
+source "${PROJECT_ROOT}/scripts/common.sh"
 
 # Configuration
 NAMESPACE_MONITORING="monitoring"
@@ -498,8 +497,15 @@ verify_deployment() {
 # Function to register ServiceMonitor
 apply_locust_servicemonitor() {
     print_section "Registering Locust ServiceMonitor"
+    local monitor_file="${PROJECT_ROOT}/kubernetes/locust-servicemonitor.yaml"
+    if [ ! -f "$monitor_file" ]; then
+        print_warning "No ServiceMonitor manifest found. Create ${monitor_file} if you need Prometheus Operator scraping."
+        echo ""
+        return
+    fi
+
     if kubectl get crd servicemonitors.monitoring.coreos.com &> /dev/null; then
-        kubectl apply -f "${PROJECT_ROOT}/kubernetes/monitoring/locust-servicemonitor.yaml"
+        kubectl apply -f "$monitor_file"
         print_success "Locust ServiceMonitor applied"
     else
         print_warning "ServiceMonitor CRD not yet available. Re-run this script after CRD installation."
