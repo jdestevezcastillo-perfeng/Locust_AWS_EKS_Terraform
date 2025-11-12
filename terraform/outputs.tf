@@ -169,3 +169,36 @@ output "estimated_monthly_cost" {
     note              = "DESTROY resources when not in use to minimize costs!"
   }
 }
+
+################################################################################
+# EBS CSI Driver Outputs
+################################################################################
+
+output "ebs_csi_driver_role_arn" {
+  description = "IAM role ARN for EBS CSI driver"
+  value       = aws_iam_role.ebs_csi_driver_role.arn
+}
+
+output "oidc_provider_arn" {
+  description = "ARN of the OIDC provider for EKS"
+  value       = aws_iam_openid_connect_provider.eks_oidc.arn
+}
+
+################################################################################
+# VictoriaMetrics Outputs
+################################################################################
+
+output "victoriametrics_s3_bucket" {
+  description = "S3 bucket name for VictoriaMetrics long-term storage"
+  value       = aws_s3_bucket.victoriametrics_storage.bucket
+}
+
+output "victoriametrics_s3_bucket_arn" {
+  description = "ARN of the S3 bucket for VictoriaMetrics"
+  value       = aws_s3_bucket.victoriametrics_storage.arn
+}
+
+output "victoriametrics_role_arn" {
+  description = "IAM role ARN for VictoriaMetrics S3 access"
+  value       = aws_iam_role.victoriametrics_role.arn
+}

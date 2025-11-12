@@ -29,6 +29,59 @@ source "${PROJECT_ROOT}/scripts/common.sh"
 # Configuration
 NAMESPACE_MONITORING="monitoring"
 OBSERVABILITY_DIR="${PROJECT_ROOT}/scripts/observability"
+ACCESS_REPORT_FILE="${PROJECT_ROOT}/reports/observability-access.md"
+
+# Load observability environment if available
+load_observability_env() {
+    local env_file="${PROJECT_ROOT}/.env.observability"
+    if [ -f "$env_file" ]; then
+        # shellcheck disable=SC1090
+        source "$env_file"
+    fi
+}
+
+# Persist helpful URLs/commands for quick reference after setup
+generate_access_report() {
+    load_observability_env
+
+    local grafana_namespace="${GRAFANA_NAMESPACE:-$NAMESPACE_MONITORING}"
+    local prometheus_namespace="${PROMETHEUS_NAMESPACE:-$NAMESPACE_MONITORING}"
+    local locust_namespace="${LOCUST_NAMESPACE:-locust}"
+    local grafana_password="${GRAFANA_ADMIN_PASSWORD:-admin123}"
+
+    local grafana_port_forward="kubectl port-forward -n ${grafana_namespace} svc/prometheus-grafana 3000:80"
+    local prometheus_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/prometheus-grafana 9090:9090"
+
+    local locust_host
+    locust_host=$(get_loadbalancer_ip "$locust_namespace" "locust-master" || true)
+    local locust_url locust_note
+    if [ -n "$locust_host" ]; then
+        locust_url="http://${locust_host}:8089"
+        locust_note="Public LoadBalancer for service 'locust-master' in namespace ${locust_namespace}."
+    else
+        locust_url="(pending)"
+        locust_note="LoadBalancer not ready yet. Check with 'kubectl get svc -n ${locust_namespace} locust-master'."
+    fi
+
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%d %H:%M:%SZ")
+
+    mkdir -p "${PROJECT_ROOT}/reports"
+
+    cat > "$ACCESS_REPORT_FILE" <<EOF
+# Observability Access Links
+
+_Last updated: ${timestamp}_
+
+| Service | URL | Notes |
+| --- | --- | --- |
+| Grafana | http://localhost:3000 | Port-forward: \`${grafana_port_forward}\`. Credentials: admin / ${grafana_password}. |
+| Prometheus | http://localhost:9090 | Port-forward: \`${prometheus_port_forward}\`. Targets view: \`http://localhost:9090/targets\`. |
+| Locust UI | ${locust_url} | ${locust_note} |
+EOF
+
+    print_success "Access instructions saved to ${ACCESS_REPORT_FILE#$PROJECT_ROOT/}"
+}
 
 # Function to show help
 show_help() {
@@ -108,6 +161,9 @@ run_setup() {
     else
         "${OBSERVABILITY_DIR}/setup-prometheus-grafana.sh"
     fi
+
+    print_info "Documenting observability entry points..."
+    generate_access_report
 }
 
 # Function to run cleanup
