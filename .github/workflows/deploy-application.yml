@@ -1,0 +1,714 @@
+name: Deploy Locust Application
+
+on:
+  # Manual trigger with environment and version selection
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: 'dev'
+      image_tag:
+        description: 'Docker image tag (leave empty for auto-generated from commit SHA)'
+        required: false
+        type: string
+        default: ''
+      skip_tests:
+        description: 'Skip pre-deployment tests'
+        required: false
+        type: boolean
+        default: false
+
+  # Can be called by other workflows
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: string
+      image_tag:
+        description: 'Docker image tag'
+        required: false
+        type: string
+        default: ''
+      skip_tests:
+        description: 'Skip pre-deployment tests'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: false
+      ECR_REPOSITORY_URL:
+        required: false
+      EKS_CLUSTER_NAME:
+        required: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-central-1' }}
+  DOCKER_BUILDKIT: 1
+  BUILDKIT_PROGRESS: plain
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: Validate prerequisites and infrastructure
+  # -------------------------------------------------------------------------
+  validate:
+    name: Validate Prerequisites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ecr-repository-url: ${{ steps.get-outputs.outputs.ecr-repository-url }}
+      cluster-name: ${{ steps.get-outputs.outputs.cluster-name }}
+      aws-account-id: ${{ steps.setup.outputs.aws-account-id }}
+      image-tag: ${{ steps.set-tag.outputs.image-tag }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Prerequisites
+        id: setup
+        uses: ./.github/actions/setup-prerequisites
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: '1.9.0'
+          kubectl-version: '1.31.0'
+
+      - name: Initialize Terraform
+        working-directory: terraform
+        run: |
+          echo "Initializing Terraform..."
+          terraform init -input=false
+
+      - name: Validate Terraform State
+        working-directory: terraform
+        run: |
+          echo "Validating Terraform state..."
+
+          # Check if state exists
+          if ! terraform state list > /dev/null 2>&1; then
+            echo "ERROR: Terraform state is empty or not initialized"
+            echo "Infrastructure must be deployed before running application deployment"
+            exit 1
+          fi
+
+          echo "Terraform state validated"
+
+      - name: Get Infrastructure Outputs
+        id: get-outputs
+        working-directory: terraform
+        run: |
+          echo "Retrieving infrastructure outputs..."
+
+          # Get ECR repository URL
+          ECR_REPO_URL="${{ secrets.ECR_REPOSITORY_URL }}"
+          if [ -z "$ECR_REPO_URL" ]; then
+            ECR_REPO_URL=$(terraform output -raw ecr_repository_url 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$ECR_REPO_URL" ]; then
+            echo "ERROR: ECR repository URL not found"
+            echo "Please ensure infrastructure is deployed or provide ECR_REPOSITORY_URL secret"
+            exit 1
+          fi
+
+          # Get EKS cluster name
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "ERROR: EKS cluster name not found"
+            echo "Please ensure infrastructure is deployed or provide EKS_CLUSTER_NAME secret"
+            exit 1
+          fi
+
+          echo "ecr-repository-url=${ECR_REPO_URL}" >> $GITHUB_OUTPUT
+          echo "cluster-name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+
+          echo "Infrastructure outputs retrieved:"
+          echo "  ECR Repository: ${ECR_REPO_URL}"
+          echo "  EKS Cluster: ${CLUSTER_NAME}"
+
+      - name: Verify EKS Cluster Access
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          echo "Configuring kubectl for cluster: ${{ steps.get-outputs.outputs.cluster-name }}"
+
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ steps.get-outputs.outputs.cluster-name }}
+
+          echo "Verifying cluster connectivity..."
+          kubectl cluster-info
+          kubectl get nodes
+
+          echo "Cluster access verified"
+
+      - name: Set Image Tag
+        id: set-tag
+        run: |
+          # Use provided tag or generate from git commit
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          else
+            # Generate tag: env-gitsha-timestamp
+            GIT_SHA=$(git rev-parse --short HEAD)
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            IMAGE_TAG="${{ inputs.environment }}-${GIT_SHA}-${TIMESTAMP}"
+          fi
+
+          echo "image-tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Using image tag: ${IMAGE_TAG}"
+
+  # -------------------------------------------------------------------------
+  # Job 2: Build and push Docker image to ECR
+  # -------------------------------------------------------------------------
+  build-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 20
+    outputs:
+      image-uri: ${{ steps.push.outputs.image-uri }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract ECR Registry
+        id: ecr-registry
+        run: |
+          ECR_REGISTRY=$(echo "${{ needs.validate.outputs.ecr-repository-url }}" | cut -d'/' -f1)
+          echo "registry=${ECR_REGISTRY}" >> $GITHUB_OUTPUT
+          echo "ECR Registry: ${ECR_REGISTRY}"
+
+      - name: Build Docker Image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: |
+            locust-load-tests:${{ needs.validate.outputs.image-tag }}
+            locust-load-tests:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
+
+      - name: Run Container Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: locust-load-tests:${{ needs.validate.outputs.image-tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy Results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Tag Image for ECR
+        run: |
+          IMAGE_TAG="${{ needs.validate.outputs.image-tag }}"
+          ECR_REPO="${{ needs.validate.outputs.ecr-repository-url }}"
+
+          echo "Tagging images for ECR..."
+          docker tag "locust-load-tests:${IMAGE_TAG}" "${ECR_REPO}:${IMAGE_TAG}"
+          docker tag "locust-load-tests:${IMAGE_TAG}" "${ECR_REPO}:latest"
+          docker tag "locust-load-tests:${IMAGE_TAG}" "${ECR_REPO}:${{ inputs.environment }}-latest"
+
+          echo "Tagged images:"
+          echo "  ${ECR_REPO}:${IMAGE_TAG}"
+          echo "  ${ECR_REPO}:latest"
+          echo "  ${ECR_REPO}:${{ inputs.environment }}-latest"
+
+      - name: Push Image to ECR
+        id: push
+        run: |
+          IMAGE_TAG="${{ needs.validate.outputs.image-tag }}"
+          ECR_REPO="${{ needs.validate.outputs.ecr-repository-url }}"
+
+          echo "Pushing images to ECR..."
+
+          # Push versioned tag
+          docker push "${ECR_REPO}:${IMAGE_TAG}"
+          echo "Pushed: ${ECR_REPO}:${IMAGE_TAG}"
+
+          # Push latest tag
+          docker push "${ECR_REPO}:latest"
+          echo "Pushed: ${ECR_REPO}:latest"
+
+          # Push environment-specific latest tag
+          docker push "${ECR_REPO}:${{ inputs.environment }}-latest"
+          echo "Pushed: ${ECR_REPO}:${{ inputs.environment }}-latest"
+
+          # Output image URI for deployment
+          IMAGE_URI="${ECR_REPO}:${IMAGE_TAG}"
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "All images pushed successfully"
+
+      - name: Generate Image Metadata
+        run: |
+          cat > image-metadata.json <<EOF
+          {
+            "image_uri": "${{ steps.push.outputs.image-uri }}",
+            "image_tag": "${{ needs.validate.outputs.image-tag }}",
+            "environment": "${{ inputs.environment }}",
+            "git_sha": "$(git rev-parse HEAD)",
+            "git_branch": "$(git rev-parse --abbrev-ref HEAD)",
+            "build_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "built_by": "${{ github.actor }}"
+          }
+          EOF
+
+          echo "Image metadata:"
+          cat image-metadata.json
+
+      - name: Upload Image Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata.json
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Job 3: Deploy to Kubernetes
+  # -------------------------------------------------------------------------
+  deploy-kubernetes:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [validate, build-push]
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment }}
+      url: http://${{ steps.get-loadbalancer.outputs.loadbalancer-url }}:8089
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ needs.validate.outputs.cluster-name }}
+
+          kubectl cluster-info
+          echo "kubectl configured successfully"
+
+      - name: Deploy Locust Stack
+        run: |
+          IMAGE_URI="${{ needs.build-push.outputs.image-uri }}"
+          echo "Applying manifests with image ${IMAGE_URI}"
+          sed "s|__LOCUST_IMAGE__|${IMAGE_URI}|g" kubernetes/locust-stack.yaml | kubectl apply -f -
+
+          echo "Waiting for master deployment..."
+          kubectl rollout status deployment/locust-master -n locust --timeout=300s
+
+          echo "Waiting for worker deployment..."
+          kubectl rollout status deployment/locust-worker -n locust --timeout=300s
+
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployment status..."
+
+          # Check master pod
+          echo "Master pod status:"
+          kubectl get pods -n locust -l component=master
+
+          # Check worker pods
+          echo "Worker pods status:"
+          kubectl get pods -n locust -l component=worker
+
+          # Check services
+          echo "Services:"
+          kubectl get svc -n locust
+
+          # Check HPA
+          echo "HPA status:"
+          kubectl get hpa -n locust
+
+      - name: Get LoadBalancer URL
+        id: get-loadbalancer
+        run: |
+          echo "Waiting for LoadBalancer to be provisioned..."
+
+          # Wait up to 5 minutes for LoadBalancer IP/hostname
+          timeout=300
+          elapsed=0
+          interval=10
+
+          while [ $elapsed -lt $timeout ]; do
+            LB_HOSTNAME=$(kubectl get svc locust-master -n locust -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            LB_IP=$(kubectl get svc locust-master -n locust -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+
+            if [ -n "$LB_HOSTNAME" ]; then
+              echo "loadbalancer-url=${LB_HOSTNAME}" >> $GITHUB_OUTPUT
+              echo "LoadBalancer provisioned: ${LB_HOSTNAME}"
+              break
+            elif [ -n "$LB_IP" ]; then
+              echo "loadbalancer-url=${LB_IP}" >> $GITHUB_OUTPUT
+              echo "LoadBalancer provisioned: ${LB_IP}"
+              break
+            fi
+
+            echo "Waiting for LoadBalancer... (${elapsed}s elapsed)"
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+
+          if [ $elapsed -ge $timeout ]; then
+            echo "WARNING: LoadBalancer not provisioned within timeout"
+            echo "Check status manually: kubectl get svc locust-master -n locust"
+          fi
+
+      - name: Run Health Checks
+        run: |
+          echo "Running post-deployment health checks..."
+
+          # Check if master pod is ready
+          MASTER_READY=$(kubectl get deployment locust-master -n locust -o jsonpath='{.status.readyReplicas}')
+          if [ "$MASTER_READY" != "1" ]; then
+            echo "ERROR: Master pod is not ready"
+            kubectl describe deployment locust-master -n locust
+            exit 1
+          fi
+          echo "Master pod health check: PASSED"
+
+          # Check if at least one worker is ready
+          WORKERS_READY=$(kubectl get deployment locust-worker -n locust -o jsonpath='{.status.readyReplicas}')
+          if [ "$WORKERS_READY" -lt "1" ]; then
+            echo "ERROR: No worker pods are ready"
+            kubectl describe deployment locust-worker -n locust
+            exit 1
+          fi
+          echo "Worker pods health check: PASSED (${WORKERS_READY} ready)"
+
+          # Check master service endpoint
+          ENDPOINTS=$(kubectl get endpoints locust-master -n locust -o jsonpath='{.subsets[*].addresses[*].ip}')
+          if [ -z "$ENDPOINTS" ]; then
+            echo "ERROR: Master service has no endpoints"
+            kubectl describe service locust-master -n locust
+            exit 1
+          fi
+          echo "Service endpoint health check: PASSED"
+
+          echo "All health checks passed"
+
+      - name: Generate Deployment Summary
+        run: |
+          cat > deployment-summary.md <<EOF
+          # Deployment Summary
+
+          ## Environment
+          - Environment: ${{ inputs.environment }}
+          - AWS Region: ${{ env.AWS_REGION }}
+          - EKS Cluster: ${{ needs.validate.outputs.cluster-name }}
+
+          ## Container Image
+          - Image URI: ${{ needs.build-push.outputs.image-uri }}
+          - Image Tag: ${{ needs.validate.outputs.image-tag }}
+
+          ## Deployment Details
+          - Git SHA: $(git rev-parse HEAD)
+          - Git Branch: $(git rev-parse --abbrev-ref HEAD)
+          - Deployed By: ${{ github.actor }}
+          - Deployment Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          ## Kubernetes Resources
+
+          ### Master Deployment
+          \`\`\`
+          $(kubectl get deployment locust-master -n locust -o wide)
+          \`\`\`
+
+          ### Worker Deployment
+          \`\`\`
+          $(kubectl get deployment locust-worker -n locust -o wide)
+          \`\`\`
+
+          ### Services
+          \`\`\`
+          $(kubectl get svc -n locust)
+          \`\`\`
+
+          ### Horizontal Pod Autoscaler
+          \`\`\`
+          $(kubectl get hpa -n locust)
+          \`\`\`
+
+          ## Access Information
+          EOF
+
+          if [ -n "${{ steps.get-loadbalancer.outputs.loadbalancer-url }}" ]; then
+            cat >> deployment-summary.md <<EOF
+
+          - Locust Web UI: http://${{ steps.get-loadbalancer.outputs.loadbalancer-url }}:8089
+
+          ## Quick Commands
+
+          \`\`\`bash
+          # View master logs
+          kubectl logs -f deployment/locust-master -n locust
+
+          # View worker logs
+          kubectl logs -f deployment/locust-worker -n locust
+
+          # Scale workers manually
+          kubectl scale deployment locust-worker -n locust --replicas=5
+
+          # Check HPA status
+          kubectl get hpa -n locust
+
+          # Access Locust UI (if LoadBalancer not ready)
+          kubectl port-forward -n locust svc/locust-master 8089:8089
+          # Then open: http://localhost:8089
+          \`\`\`
+          EOF
+          else
+            cat >> deployment-summary.md <<EOF
+
+          - LoadBalancer URL: Provisioning in progress
+          - Check status: \`kubectl get svc locust-master -n locust\`
+
+          ## Access via Port Forward
+
+          While LoadBalancer provisions, use port-forward:
+
+          \`\`\`bash
+          kubectl port-forward -n locust svc/locust-master 8089:8089
+          # Then open: http://localhost:8089
+          \`\`\`
+          EOF
+          fi
+
+          echo "Deployment summary generated"
+          cat deployment-summary.md
+
+      - name: Upload Deployment Summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-summary
+          path: deployment-summary.md
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Job 4: Post-deployment verification
+  # -------------------------------------------------------------------------
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: [validate, build-push, deploy-kubernetes]
+    timeout-minutes: 10
+    if: ${{ !inputs.skip_tests }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ needs.validate.outputs.cluster-name }}
+
+      - name: Wait for Pods to be Ready
+        run: |
+          echo "Waiting for all pods to be in Running state..."
+
+          kubectl wait --for=condition=ready pod \
+            -l app=locust \
+            -n locust \
+            --timeout=300s
+
+          echo "All pods are ready"
+
+      - name: Test Master Web UI Accessibility
+        run: |
+          echo "Testing master web UI accessibility..."
+
+          # Port-forward to master service
+          kubectl port-forward -n locust svc/locust-master 8089:8089 &
+          PF_PID=$!
+
+          # Wait for port-forward to be ready
+          sleep 5
+
+          # Test HTTP endpoint
+          if curl -f -s http://localhost:8089/ > /dev/null; then
+            echo "Master Web UI is accessible"
+          else
+            echo "ERROR: Master Web UI is not accessible"
+            kill $PF_PID
+            exit 1
+          fi
+
+          # Cleanup
+          kill $PF_PID
+
+      - name: Verify Master-Worker Communication
+        run: |
+          echo "Verifying master-worker communication..."
+
+          # Check master logs for worker connections
+          MASTER_LOGS=$(kubectl logs -n locust deployment/locust-master --tail=50)
+
+          if echo "$MASTER_LOGS" | grep -q "worker"; then
+            echo "Workers are communicating with master"
+          else
+            echo "WARNING: No worker connections detected in master logs"
+            echo "This may be normal if workers haven't connected yet"
+          fi
+
+      - name: Check Resource Usage
+        run: |
+          echo "Checking resource usage..."
+
+          kubectl top nodes 2>/dev/null || echo "Metrics server may not be installed"
+          kubectl top pods -n locust 2>/dev/null || echo "Pod metrics not available"
+
+      - name: Generate Verification Report
+        run: |
+          cat > verification-report.md <<EOF
+          # Deployment Verification Report
+
+          ## Status: PASSED
+
+          ### Pod Status
+          \`\`\`
+          $(kubectl get pods -n locust -o wide)
+          \`\`\`
+
+          ### Deployment Status
+          \`\`\`
+          $(kubectl get deployments -n locust)
+          \`\`\`
+
+          ### Service Status
+          \`\`\`
+          $(kubectl get svc -n locust)
+          \`\`\`
+
+          ### Recent Events
+          \`\`\`
+          $(kubectl get events -n locust --sort-by='.lastTimestamp' | tail -20)
+          \`\`\`
+
+          ### Verification Timestamp
+          $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+          cat verification-report.md
+
+      - name: Upload Verification Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report
+          path: verification-report.md
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Job 5: Notification and Summary
+  # -------------------------------------------------------------------------
+  notify:
+    name: Send Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [validate, build-push, deploy-kubernetes, verify-deployment]
+    if: always()
+
+    steps:
+      - name: Download Deployment Summary
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-summary
+        continue-on-error: true
+
+      - name: Create Job Summary
+        run: |
+          if [ -f deployment-summary.md ]; then
+            cat deployment-summary.md >> $GITHUB_STEP_SUMMARY
+          else
+            cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # Deployment Summary
+
+          ## Status
+          - Validation: ${{ needs.validate.result }}
+          - Build & Push: ${{ needs.build-push.result }}
+          - Kubernetes Deploy: ${{ needs.deploy-kubernetes.result }}
+          - Verification: ${{ needs.verify-deployment.result }}
+
+          ## Environment
+          - Environment: ${{ inputs.environment }}
+          - Image Tag: ${{ needs.validate.outputs.image-tag }}
+          - EKS Cluster: ${{ needs.validate.outputs.cluster-name }}
+          EOF
+          fi
+
+      - name: Check Deployment Status
+        run: |
+          if [ "${{ needs.deploy-kubernetes.result }}" == "success" ]; then
+            echo "Deployment completed successfully"
+            exit 0
+          else
+            echo "Deployment failed or was cancelled"
+            exit 1
+          fi

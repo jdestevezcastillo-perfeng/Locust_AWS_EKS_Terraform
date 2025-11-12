@@ -26,7 +26,7 @@ echo "=============================================="
 if [ "$LOCUST_MODE" = "master" ]; then
     echo "Starting Locust Master..."
     echo "Web UI will be available on port 8089"
-    echo "Prometheus metrics will be available on port 8089/metrics"
+    echo "Prometheus metrics will be available on port 8090/metrics"
     echo "Workers should connect to: ${HOSTNAME}:${MASTER_PORT}"
 
     exec locust \

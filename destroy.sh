@@ -1,118 +1,110 @@
 #!/bin/bash
 
-################################################################################
-#                                                                              #
-#  Locust on AWS EKS - Complete Destruction Script                           #
-#  Location: /home/lostborion/Documents/veeam-extended/destroy.sh            #
-#                                                                              #
-#  This script safely destroys all resources created by deploy.sh:           #
-#                                                                              #
-#  1. Delete Kubernetes Resources (namespaces, pods, services, etc)          #
-#  2. Delete ECR Images (Docker images in registry)                           #
-#  3. Destroy AWS Infrastructure (EKS, VPC, RDS, etc via Terraform)          #
-#  4. Clean Up Local Files (kubeconfig, Terraform state, etc)                #
-#                                                                              #
-#  Usage:                                                                      #
-#    ./destroy.sh              # Safely destroy all resources                  #
-#                                                                              #
-#  Total Time: ~15-20 minutes                                                 #
-#                                                                              #
-#  WARNING: This is a DESTRUCTIVE operation. All data will be lost.          #
-#           You will be asked to confirm before proceeding.                   #
-#                                                                              #
-################################################################################
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 
-# Source library functions
-source "${PROJECT_ROOT}/scripts/lib/colors.sh"
-source "${PROJECT_ROOT}/scripts/lib/common.sh"
+source "${PROJECT_ROOT}/scripts/common.sh"
 
-# Display warning banner
-clear
-print_header "⚠️  WARNING: DESTRUCTIVE OPERATION ⚠️"
-echo ""
-print_error "This script will PERMANENTLY DELETE:"
-echo ""
-print_status "  • All Kubernetes resources (pods, services, deployments)"
-print_status "  • All Docker images in ECR"
-print_status "  • All AWS infrastructure (EKS cluster, VPC, nodes)"
-print_status "  • All data and logs"
-echo ""
-print_error "This action CANNOT be undone!"
-echo ""
+delete_k8s_resources() {
+    print_section "Deleting Kubernetes Resources"
+    if ! verify_kubectl_connection; then
+        print_warning "kubectl not configured, skipping Kubernetes cleanup"
+        return
+    fi
 
-# Confirmation prompt
-read -p "Type 'destroy' to confirm: " CONFIRM
+    kubectl delete namespace locust --ignore-not-found --wait=false || \
+        print_warning "Namespace deletion reported issues"
 
-if [ "$CONFIRM" != "destroy" ]; then
-    print_warning "Destruction cancelled"
-    exit 0
-fi
+    wait_for_condition 180 \
+        "! kubectl get namespace locust &>/dev/null" \
+        "locust namespace removal" || \
+        print_warning "Namespace still terminating in background"
+}
 
-echo ""
-read -p "Are you absolutely sure? Type 'yes' to proceed: " FINAL_CONFIRM
+delete_ecr_images() {
+    print_section "Removing ECR Images"
+    local repo_url repo_name region
+    repo_url=$(get_tf_output "ecr_repository_url")
+    region=$(get_tf_output "aws_region")
 
-if [ "$FINAL_CONFIRM" != "yes" ]; then
-    print_warning "Destruction cancelled"
-    exit 0
-fi
+    if [ -z "$repo_url" ]; then
+        print_warning "ECR repository output not found – skipping image deletion"
+        return
+    fi
 
-echo ""
+    repo_name="${repo_url##*/}"
+    region=${region:-$(get_aws_region)}
 
-# Record start time
-START_TIME=$(date +%s)
+    if ! aws ecr describe-repositories --repository-names "$repo_name" --region "$region" &>/dev/null; then
+        print_warning "Repository ${repo_name} missing – skipping"
+        return
+    fi
 
-# Execute destruction phases
-print_section "Executing Destruction Phases"
-echo ""
+    local image_ids
+    image_ids=$(aws ecr list-images --repository-name "$repo_name" --region "$region" --query 'imageIds' --output json)
+    if [[ "$image_ids" == "[]" ]]; then
+        print_info "No images to delete in ${repo_name}"
+        return
+    fi
 
-print_info "Phase 1/4: Deleting Kubernetes Resources..."
-"${PROJECT_ROOT}/scripts/destroy/01-delete-k8s-resources.sh" || print_warning "K8s deletion had issues"
-echo ""
+    aws ecr batch-delete-image \
+        --repository-name "$repo_name" \
+        --image-ids "$image_ids" \
+        --region "$region" || print_warning "Some images may remain in ${repo_name}"
+}
 
-print_info "Phase 2/4: Deleting ECR Images..."
-"${PROJECT_ROOT}/scripts/destroy/02-delete-ecr-images.sh" || print_warning "ECR deletion had issues"
-echo ""
+destroy_infrastructure() {
+    print_section "Destroying Terraform Infrastructure"
+    pushd "${PROJECT_ROOT}/terraform" >/dev/null
 
-print_info "Phase 3/4: Destroying AWS Infrastructure..."
-"${PROJECT_ROOT}/scripts/destroy/03-destroy-infrastructure.sh" || print_warning "Infrastructure destruction had issues"
-echo ""
+    if [ ! -f "terraform.tfstate" ]; then
+        print_warning "terraform.tfstate missing – resources may already be gone"
+        popd >/dev/null
+        return
+    fi
 
-print_info "Phase 4/4: Cleaning Up Local Files..."
-"${PROJECT_ROOT}/scripts/destroy/04-cleanup-local.sh" || print_warning "Local cleanup had issues"
-echo ""
+    terraform plan -destroy -out=tfplan
+    terraform apply tfplan
+    rm -f tfplan terraform.tfstate terraform.tfstate.backup
+    popd >/dev/null
+}
 
-# Calculate total time
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-MINUTES=$((DURATION / 60))
-SECONDS=$((DURATION % 60))
+cleanup_local() {
+    print_section "Cleaning Local Artifacts"
+    rm -rf "${PROJECT_ROOT}/terraform/.terraform"
+    docker rmi -f locust-load-tests:latest 2>/dev/null || true
 
-# Final summary
-print_header "DESTRUCTION COMPLETE!"
-echo ""
-print_warning "All resources have been deleted"
-print_info "Total destruction time: ${MINUTES}m ${SECONDS}s"
-echo ""
+    local current_context
+    if current_context=$(kubectl config current-context 2>/dev/null) && [[ "$current_context" == *"locust"* ]]; then
+        kubectl config delete-context "$current_context" || true
+    fi
+}
 
-print_section "What Was Deleted"
-print_status "  ✓ Kubernetes namespaces and all resources"
-print_status "  ✓ ECR images and configurations"
-print_status "  ✓ EKS cluster and node groups"
-print_status "  ✓ VPC, subnets, and networking"
-print_status "  ✓ IAM roles and security groups"
-print_status "  ✓ CloudWatch logs"
-print_status "  ✓ Local configuration files"
-echo ""
+confirm_destruction() {
+    clear
+    print_header "⚠ LOCUST DEPLOYMENT CLEANUP ⚠"
+    print_error "All Kubernetes resources, AWS infrastructure, and Docker images will be deleted."
+    read -p "Type 'destroy' to continue: " confirm
+    [[ "$confirm" == "destroy" ]] || { print_warning "Cancelled"; exit 0; }
+    read -p "Type 'yes' to confirm again: " final_confirm
+    [[ "$final_confirm" == "yes" ]] || { print_warning "Cancelled"; exit 0; }
+}
 
-print_section "What Remains"
-print_status "  • Source code and configuration files in this directory"
-print_status "  • Documentation and guides"
-print_status "  • Terraform modules and scripts"
-echo ""
+main() {
+    confirm_destruction
+    local start_time
+    start_time=$(date +%s)
 
-print_success "You can safely delete this directory or re-deploy with './deploy.sh'"
+    delete_k8s_resources
+    delete_ecr_images
+    destroy_infrastructure
+    cleanup_local
+
+    local end_time=$(( $(date +%s) - start_time ))
+    print_section "Cleanup Complete"
+    print_success "Total time: $((end_time / 60))m $((end_time % 60))s"
+}
+
+main "$@"

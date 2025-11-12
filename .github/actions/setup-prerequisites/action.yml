@@ -1,0 +1,225 @@
+name: 'Setup Prerequisites'
+description: 'Verifies and configures required tools for AWS EKS deployment'
+author: 'Platform Engineering Team'
+
+inputs:
+  aws-region:
+    description: 'AWS region for deployment'
+    required: true
+    default: 'eu-central-1'
+  terraform-version:
+    description: 'Terraform version to use'
+    required: false
+    default: '1.9.0'
+  kubectl-version:
+    description: 'kubectl version to use'
+    required: false
+    default: '1.31.0'
+
+outputs:
+  terraform-version:
+    description: 'Installed Terraform version'
+    value: ${{ steps.terraform-version.outputs.version }}
+  aws-cli-version:
+    description: 'Installed AWS CLI version'
+    value: ${{ steps.aws-version.outputs.version }}
+  kubectl-version:
+    description: 'Installed kubectl version'
+    value: ${{ steps.kubectl-version.outputs.version }}
+  aws-account-id:
+    description: 'AWS Account ID'
+    value: ${{ steps.aws-identity.outputs.account_id }}
+  aws-user:
+    description: 'AWS User/Role'
+    value: ${{ steps.aws-identity.outputs.user }}
+  validation-status:
+    description: 'Overall validation status'
+    value: ${{ steps.final-status.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    # -------------------------------------------------------------------------
+    # Terraform Setup and Verification
+    # -------------------------------------------------------------------------
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Verify Terraform Installation
+      id: terraform-version
+      shell: bash
+      run: |
+        terraform version
+        TERRAFORM_VERSION=$(terraform version -json | jq -r '.terraform_version')
+        echo "version=${TERRAFORM_VERSION}" >> $GITHUB_OUTPUT
+        echo "Terraform ${TERRAFORM_VERSION} verified"
+
+    # -------------------------------------------------------------------------
+    # AWS CLI Setup and Verification
+    # -------------------------------------------------------------------------
+    - name: Verify AWS CLI Installation
+      id: aws-version
+      shell: bash
+      run: |
+        # GitHub Actions runners have AWS CLI v2 pre-installed
+        aws --version
+        AWS_VERSION=$(aws --version 2>&1 | awk '{print $1}' | cut -d'/' -f2)
+        echo "version=${AWS_VERSION}" >> $GITHUB_OUTPUT
+        echo "AWS CLI ${AWS_VERSION} verified"
+
+    - name: Configure AWS Credentials
+      shell: bash
+      run: |
+        echo "Configuring AWS credentials for region: ${{ inputs.aws-region }}"
+        # Credentials are set via environment variables from GitHub secrets
+        # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
+        aws configure set default.region ${{ inputs.aws-region }}
+        aws configure set default.output json
+
+    - name: Validate AWS Credentials
+      id: aws-identity
+      shell: bash
+      run: |
+        echo "Validating AWS credentials..."
+
+        # Get caller identity
+        IDENTITY=$(aws sts get-caller-identity)
+        ACCOUNT_ID=$(echo $IDENTITY | jq -r '.Account')
+        USER_ARN=$(echo $IDENTITY | jq -r '.Arn')
+        USER=$(echo $USER_ARN | awk -F'/' '{print $NF}')
+
+        echo "account_id=${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+        echo "user=${USER}" >> $GITHUB_OUTPUT
+
+        echo "AWS Credentials Validated:"
+        echo "  Account ID: ${ACCOUNT_ID}"
+        echo "  User/Role: ${USER}"
+        echo "  ARN: ${USER_ARN}"
+
+    - name: Verify IAM Permissions
+      shell: bash
+      run: |
+        echo "Verifying IAM permissions..."
+
+        # Check basic IAM permissions
+        if aws iam get-user 2>/dev/null; then
+          echo "IAM user permissions verified"
+        elif aws sts get-caller-identity 2>/dev/null; then
+          echo "IAM role permissions verified (assumed role)"
+        else
+          echo "ERROR: Unable to verify IAM permissions"
+          exit 1
+        fi
+
+    # -------------------------------------------------------------------------
+    # kubectl Setup and Verification
+    # -------------------------------------------------------------------------
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: 'v${{ inputs.kubectl-version }}'
+
+    - name: Verify kubectl Installation
+      id: kubectl-version
+      shell: bash
+      run: |
+        kubectl version --client=true
+        KUBECTL_VERSION=$(kubectl version --client=true -o json | jq -r '.clientVersion.gitVersion' | sed 's/v//')
+        echo "version=${KUBECTL_VERSION}" >> $GITHUB_OUTPUT
+        echo "kubectl ${KUBECTL_VERSION} verified"
+
+    # -------------------------------------------------------------------------
+    # Docker Tools Verification
+    # -------------------------------------------------------------------------
+    - name: Verify Docker Installation
+      shell: bash
+      run: |
+        echo "Verifying Docker installation..."
+        docker --version
+        docker info
+        echo "Docker verified and running"
+
+    # -------------------------------------------------------------------------
+    # jq Verification
+    # -------------------------------------------------------------------------
+    - name: Verify jq Installation
+      shell: bash
+      run: |
+        echo "Verifying jq installation..."
+        jq --version
+        echo "jq verified"
+
+    # -------------------------------------------------------------------------
+    # Project Structure Validation
+    # -------------------------------------------------------------------------
+    - name: Validate Project Structure
+      shell: bash
+      run: |
+        echo "Validating project structure..."
+
+        # Check for required directories
+        if [ ! -d "terraform" ]; then
+          echo "ERROR: terraform directory not found"
+          exit 1
+        fi
+        echo "terraform directory found"
+
+        # Check for required Terraform files
+        REQUIRED_TF_FILES=("main.tf" "variables.tf" "outputs.tf")
+        for file in "${REQUIRED_TF_FILES[@]}"; do
+          if [ ! -f "terraform/${file}" ]; then
+            echo "ERROR: terraform/${file} not found"
+            exit 1
+          fi
+          echo "terraform/${file} found"
+        done
+
+        # Check for Dockerfile
+        if [ ! -f "docker/Dockerfile" ]; then
+          echo "WARNING: docker/Dockerfile not found"
+        else
+          echo "docker/Dockerfile found"
+        fi
+
+        # Check for Python dependencies
+        if [ ! -f "pyproject.toml" ]; then
+          echo "WARNING: pyproject.toml not found"
+        else
+          echo "pyproject.toml found"
+        fi
+
+        echo "Project structure validation complete"
+
+    # -------------------------------------------------------------------------
+    # Cache Terraform Plugins
+    # -------------------------------------------------------------------------
+    - name: Cache Terraform Plugins
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.terraform.d/plugin-cache
+          terraform/.terraform
+        key: ${{ runner.os }}-terraform-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+        restore-keys: |
+          ${{ runner.os }}-terraform-
+
+    # -------------------------------------------------------------------------
+    # Final Status
+    # -------------------------------------------------------------------------
+    - name: Set Final Status
+      id: final-status
+      shell: bash
+      run: |
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "All prerequisites validated successfully"
+        echo ""
+        echo "Summary:"
+        echo "  Terraform: ${{ steps.terraform-version.outputs.version }}"
+        echo "  AWS CLI: ${{ steps.aws-version.outputs.version }}"
+        echo "  kubectl: ${{ steps.kubectl-version.outputs.version }}"
+        echo "  AWS Account: ${{ steps.aws-identity.outputs.account_id }}"
+        echo "  AWS User: ${{ steps.aws-identity.outputs.user }}"
+        echo "  Region: ${{ inputs.aws-region }}"

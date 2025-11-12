@@ -1,0 +1,251 @@
+name: Complete Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: 'dev'
+
+      terraform_action:
+        description: 'Terraform action (plan/apply)'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: 'plan'
+
+      auto_approve:
+        description: 'Auto-approve Terraform apply (required for apply)'
+        required: true
+        type: boolean
+        default: false
+
+      image_tag:
+        description: 'Docker image tag (leave empty for auto-generated)'
+        required: false
+        type: string
+        default: ''
+
+      skip_infrastructure:
+        description: 'Skip infrastructure deployment'
+        required: false
+        type: boolean
+        default: false
+
+      skip_monitoring:
+        description: 'Skip monitoring deployment'
+        required: false
+        type: boolean
+        default: false
+
+      deploy_application:
+        description: 'Deploy application after infrastructure'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-central-1' }}
+
+jobs:
+  # Job 1: Deploy Infrastructure (if not skipped and action is apply)
+  infrastructure:
+    name: Deploy Infrastructure
+    if: ${{ !inputs.skip_infrastructure && inputs.terraform_action == 'apply' }}
+    uses: ./.github/workflows/deploy-infrastructure.yml
+    with:
+      environment: ${{ inputs.environment }}
+      terraform_action: ${{ inputs.terraform_action }}
+      auto_approve: ${{ inputs.auto_approve }}
+    secrets: inherit
+
+  # Job 2: Deploy Application (after infrastructure, if requested)
+  application:
+    name: Deploy Application
+    needs: [infrastructure]
+    if: |
+      always() &&
+      inputs.deploy_application &&
+      (needs.infrastructure.result == 'success' || inputs.skip_infrastructure)
+    uses: ./.github/workflows/deploy-application.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit
+
+  # Job 3: Deploy Monitoring (after application, if not skipped)
+  monitoring:
+    name: Deploy Monitoring
+    needs: [application]
+    if: |
+      always() &&
+      !inputs.skip_monitoring &&
+      (needs.application.result == 'success' || !inputs.deploy_application)
+    uses: ./.github/workflows/deploy-monitoring.yml
+    with:
+      cluster_name: ${{ needs.application.outputs.cluster-name || '' }}
+      aws_region: ${{ env.AWS_REGION }}
+    secrets: inherit
+
+  # Job 4: Deployment Summary
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [infrastructure, application, monitoring]
+    if: always()
+
+    steps:
+      - name: Generate Deployment Summary
+        run: |
+          echo "# 🚀 Complete Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          # Infrastructure status
+          if [ "${{ inputs.skip_infrastructure }}" == "true" ]; then
+            echo "| Infrastructure | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.infrastructure.result }}" == "success" ]; then
+            echo "| Infrastructure | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.infrastructure.result }}" == "failure" ]; then
+            echo "| Infrastructure | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Infrastructure | ⏸️ Not Run |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Application status
+          if [ "${{ inputs.deploy_application }}" == "false" ]; then
+            echo "| Application | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.application.result }}" == "success" ]; then
+            echo "| Application | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.application.result }}" == "failure" ]; then
+            echo "| Application | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Application | ⏸️ Not Run |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Monitoring status
+          if [ "${{ inputs.skip_monitoring }}" == "true" ]; then
+            echo "| Monitoring | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.monitoring.result }}" == "success" ]; then
+            echo "| Monitoring | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.monitoring.result }}" == "failure" ]; then
+            echo "| Monitoring | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Monitoring | ⏸️ Not Run |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Access Information
+          if [ "${{ needs.application.result }}" == "success" ]; then
+            echo "## 🌐 Access Information" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Locust Web UI" >> $GITHUB_STEP_SUMMARY
+            echo "Check the Application workflow logs for the LoadBalancer URL" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Or use port-forward:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "kubectl port-forward -n locust svc/locust-master 8089:8089" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.monitoring.result }}" == "success" ]; then
+            echo "### Monitoring Dashboards" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Grafana:**" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80" >> $GITHUB_STEP_SUMMARY
+            echo "# Access: http://localhost:3000" >> $GITHUB_STEP_SUMMARY
+            echo "# Username: admin" >> $GITHUB_STEP_SUMMARY
+            echo "# Password: (check GitHub secrets)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Prometheus:**" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090" >> $GITHUB_STEP_SUMMARY
+            echo "# Access: http://localhost:9090" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Next Steps
+          echo "## 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.infrastructure.result }}" == "success" ] && [ "${{ needs.application.result }}" == "success" ]; then
+            echo "1. ✅ Access the Locust Web UI using the URL above" >> $GITHUB_STEP_SUMMARY
+            echo "2. ✅ Configure your load test parameters" >> $GITHUB_STEP_SUMMARY
+            echo "3. ✅ Start your load test" >> $GITHUB_STEP_SUMMARY
+            echo "4. ✅ Monitor metrics in Grafana dashboards" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.infrastructure.result }}" == "failure" ]; then
+            echo "1. ❌ Review infrastructure deployment logs" >> $GITHUB_STEP_SUMMARY
+            echo "2. ❌ Fix any Terraform errors" >> $GITHUB_STEP_SUMMARY
+            echo "3. ❌ Re-run the deployment" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.application.result }}" == "failure" ]; then
+            echo "1. ❌ Review application deployment logs" >> $GITHUB_STEP_SUMMARY
+            echo "2. ❌ Check Docker build and Kubernetes manifests" >> $GITHUB_STEP_SUMMARY
+            echo "3. ❌ Re-run the deployment" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Cleanup reminder
+          echo "## 🧹 Cleanup" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "When done testing, destroy resources to avoid costs:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to **Actions** → **Deploy Infrastructure**" >> $GITHUB_STEP_SUMMARY
+          echo "2. Select **Run workflow**" >> $GITHUB_STEP_SUMMARY
+          echo "3. Set **terraform_action** to **destroy**" >> $GITHUB_STEP_SUMMARY
+          echo "4. Set **auto_approve** to **true**" >> $GITHUB_STEP_SUMMARY
+          echo "5. Click **Run workflow**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Cost estimate
+          echo "## 💰 Cost Estimate" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Estimated monthly cost for ${{ inputs.environment }} environment:" >> $GITHUB_STEP_SUMMARY
+          echo "- EKS Control Plane: ~\$73/month" >> $GITHUB_STEP_SUMMARY
+          echo "- Worker Nodes: ~\$60/month (2x t3.medium)" >> $GITHUB_STEP_SUMMARY
+          echo "- NAT Gateways: ~\$65/month" >> $GITHUB_STEP_SUMMARY
+          echo "- Monitoring Storage: ~\$6/month" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total: ~\$204/month**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "💡 Destroy resources when not in use to save costs!" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Overall Status
+        run: |
+          INFRA_STATUS="${{ needs.infrastructure.result }}"
+          APP_STATUS="${{ needs.application.result }}"
+          MON_STATUS="${{ needs.monitoring.result }}"
+
+          # Check if any critical deployment failed
+          if [[ "$INFRA_STATUS" == "failure" ]] || [[ "$APP_STATUS" == "failure" ]]; then
+            echo "❌ Deployment failed - check logs above"
+            exit 1
+          fi
+
+          # Warning if monitoring failed but app succeeded
+          if [[ "$MON_STATUS" == "failure" ]] && [[ "$APP_STATUS" == "success" ]]; then
+            echo "⚠️ Application deployed but monitoring setup failed"
+            exit 0
+          fi
+
+          echo "✅ Deployment completed successfully!"

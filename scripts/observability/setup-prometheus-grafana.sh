@@ -28,8 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source library functions
-source "${PROJECT_ROOT}/scripts/lib/colors.sh"
-source "${PROJECT_ROOT}/scripts/lib/common.sh"
+source "${PROJECT_ROOT}/scripts/common.sh"
 
 # Configuration
 NAMESPACE_MONITORING="monitoring"
@@ -125,7 +124,7 @@ deploy_prometheus() {
     print_section "Deploying Prometheus"
 
     # Create Prometheus values file
-    cat > /tmp/prometheus-values.yaml <<'EOF'
+    cat > /tmp/prometheus-values.yaml <<EOF
 prometheus:
   prometheusSpec:
     retention: 30d
@@ -147,8 +146,8 @@ prometheus:
     additionalScrapeConfigs:
       - job_name: 'locust-master'
         static_configs:
-          - targets: ['locust-master.locust.svc.cluster.local:8089']
-        metrics_path: '/stats/requests'
+          - targets: ['locust-master-internal.locust.svc.cluster.local:8090']
+        metrics_path: '/metrics'
         scrape_interval: 15s
 
       - job_name: 'kubernetes-pods'
@@ -495,82 +494,22 @@ verify_deployment() {
     echo ""
 }
 
-# Function to create Kubernetes monitoring manifests
-create_kubernetes_monitoring_manifests() {
-    print_section "Creating Kubernetes Monitoring Manifests"
+# Function to register ServiceMonitor
+apply_locust_servicemonitor() {
+    print_section "Registering Locust ServiceMonitor"
+    local monitor_file="${PROJECT_ROOT}/kubernetes/locust-servicemonitor.yaml"
+    if [ ! -f "$monitor_file" ]; then
+        print_warning "No ServiceMonitor manifest found. Create ${monitor_file} if you need Prometheus Operator scraping."
+        echo ""
+        return
+    fi
 
-    mkdir -p "${PROJECT_ROOT}/kubernetes/overlays/monitoring"
-
-    # Create ServiceMonitor for Locust metrics
-    cat > "${PROJECT_ROOT}/kubernetes/overlays/monitoring/locust-service-monitor.yaml" <<'EOF'
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: locust-metrics
-  namespace: locust
-  labels:
-    app: locust
-spec:
-  selector:
-    matchLabels:
-      app: locust-master
-  endpoints:
-    - port: web
-      interval: 15s
-      path: /stats/requests
-EOF
-
-    # Create PrometheusRule for alerting
-    cat > "${PROJECT_ROOT}/kubernetes/overlays/monitoring/prometheus-rules.yaml" <<'EOF'
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: locust-alerts
-  namespace: monitoring
-  labels:
-    prometheus: prometheus-grafana
-spec:
-  groups:
-    - name: locust.rules
-      interval: 30s
-      rules:
-        - alert: LocustMasterDown
-          expr: up{job="locust-master"} == 0
-          for: 5m
-          labels:
-            severity: critical
-          annotations:
-            summary: "Locust master is down"
-            description: "Locust master pod is not responding"
-
-        - alert: HighErrorRate
-          expr: |
-            (
-              sum(rate(locust_requests_failed_total[5m])) /
-              sum(rate(locust_requests_total[5m]))
-            ) > 0.1
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "High error rate in load test"
-            description: "Error rate is above 10%"
-
-        - alert: HighMemoryUsage
-          expr: |
-            (
-              sum(container_memory_usage_bytes{pod=~"locust-.*"}) /
-              sum(container_spec_memory_limit_bytes{pod=~"locust-.*"})
-            ) > 0.8
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "High memory usage in Locust pods"
-            description: "Memory usage is above 80%"
-EOF
-
-    print_success "Kubernetes monitoring manifests created in kubernetes/overlays/monitoring/"
+    if kubectl get crd servicemonitors.monitoring.coreos.com &> /dev/null; then
+        kubectl apply -f "$monitor_file"
+        print_success "Locust ServiceMonitor applied"
+    else
+        print_warning "ServiceMonitor CRD not yet available. Re-run this script after CRD installation."
+    fi
     echo ""
 }
 
@@ -612,11 +551,11 @@ main() {
     print_info "Phase 4/7: Deploying Prometheus and Grafana..."
     deploy_prometheus
 
-    print_info "Phase 5/7: Deploying Locust Dashboards..."
-    deploy_locust_dashboards
+    print_info "Phase 5/7: Registering Locust metrics..."
+    apply_locust_servicemonitor
 
-    print_info "Phase 6/7: Creating Kubernetes Monitoring Manifests..."
-    create_kubernetes_monitoring_manifests
+    print_info "Phase 6/7: Deploying Locust Dashboards..."
+    deploy_locust_dashboards
 
     print_info "Phase 7/7: Saving Configuration..."
     save_configuration
