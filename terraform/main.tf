@@ -563,3 +563,218 @@ resource "aws_ecr_lifecycle_policy" "locust" {
     ]
   })
 }
+
+################################################################################
+# S3 Bucket for VictoriaMetrics Long-term Storage
+################################################################################
+
+resource "aws_s3_bucket" "victoriametrics_storage" {
+  bucket_prefix = "${var.cluster_name}-vm-metrics-"
+
+  tags = {
+    Name = "${var.cluster_name}-victoriametrics-storage"
+  }
+}
+
+# Enable versioning for data protection
+resource "aws_s3_bucket_versioning" "victoriametrics_storage" {
+  bucket = aws_s3_bucket.victoriametrics_storage.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Lifecycle policy to transition old metrics to cheaper storage classes
+resource "aws_s3_bucket_lifecycle_configuration" "victoriametrics_storage" {
+  bucket = aws_s3_bucket.victoriametrics_storage.id
+
+  rule {
+    id     = "transition-old-metrics"
+    status = "Enabled"
+
+    # Move to Infrequent Access after 90 days
+    transition {
+      days          = 90
+      storage_class = "STANDARD_IA"
+    }
+
+    # Move to Glacier after 180 days (6 months)
+    transition {
+      days          = 180
+      storage_class = "GLACIER_IR"
+    }
+
+    # Move to Deep Archive after 365 days (1 year)
+    transition {
+      days          = 365
+      storage_class = "DEEP_ARCHIVE"
+    }
+  }
+
+  rule {
+    id     = "delete-old-versions"
+    status = "Enabled"
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+# Block public access
+resource "aws_s3_bucket_public_access_block" "victoriametrics_storage" {
+  bucket = aws_s3_bucket.victoriametrics_storage.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Server-side encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "victoriametrics_storage" {
+  bucket = aws_s3_bucket.victoriametrics_storage.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+################################################################################
+# IAM Role for VictoriaMetrics S3 Access (IRSA)
+################################################################################
+
+resource "aws_iam_role" "victoriametrics_role" {
+  name_prefix = "${var.cluster_name}-vm-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.eks_oidc.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:sub" = "system:serviceaccount:monitoring:victoriametrics"
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.cluster_name}-victoriametrics-role"
+  }
+}
+
+# IAM policy for S3 access
+resource "aws_iam_role_policy" "victoriametrics_s3_policy" {
+  name_prefix = "${var.cluster_name}-vm-s3-"
+  role        = aws_iam_role.victoriametrics_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ]
+        Resource = aws_s3_bucket.victoriametrics_storage.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject",
+          "s3:ListMultipartUploadParts",
+          "s3:AbortMultipartUpload"
+        ]
+        Resource = "${aws_s3_bucket.victoriametrics_storage.arn}/*"
+      }
+    ]
+  })
+}
+
+################################################################################
+# EBS CSI Driver for Persistent Volumes
+################################################################################
+
+# Data source to get the OIDC provider from EKS cluster
+data "tls_certificate" "eks_oidc" {
+  url = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+
+# OIDC provider for EKS (required for IRSA - IAM Roles for Service Accounts)
+resource "aws_iam_openid_connect_provider" "eks_oidc" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks_oidc.certificates[0].sha1_fingerprint]
+  url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
+
+  tags = {
+    Name = "${var.cluster_name}-eks-oidc-provider"
+  }
+}
+
+# IAM role for EBS CSI driver
+resource "aws_iam_role" "ebs_csi_driver_role" {
+  name_prefix = "${var.cluster_name}-ebs-csi-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.eks_oidc.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:sub" = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.cluster_name}-ebs-csi-driver-role"
+  }
+}
+
+# Attach AWS managed EBS CSI driver policy
+resource "aws_iam_role_policy_attachment" "ebs_csi_driver_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+  role       = aws_iam_role.ebs_csi_driver_role.name
+}
+
+# EKS addon for EBS CSI driver
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name             = aws_eks_cluster.main.name
+  addon_name               = "aws-ebs-csi-driver"
+  addon_version            = "v1.37.0-eksbuild.1"  # Compatible with EKS 1.28
+  service_account_role_arn = aws_iam_role.ebs_csi_driver_role.arn
+
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  tags = {
+    Name = "${var.cluster_name}-ebs-csi-driver"
+  }
+
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_iam_role_policy_attachment.ebs_csi_driver_policy
+  ]
+}

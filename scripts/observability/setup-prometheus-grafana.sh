@@ -37,7 +37,7 @@ GRAFANA_NAMESPACE="$NAMESPACE_MONITORING"
 LOCUST_NAMESPACE="locust"
 
 # Helm chart versions
-PROMETHEUS_CHART_VERSION="25.3.1"
+PROMETHEUS_CHART_VERSION="79.4.1"
 GRAFANA_CHART_VERSION="7.0.8"
 
 # Grafana configuration
@@ -167,7 +167,7 @@ prometheus:
           - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
             action: replace
             regex: ([^:]+)(?::\d+)?;(\d+)
-            replacement: $1:$2
+            replacement: \$1:\$2
             target_label: __address__
 
 prometheus-node-exporter:
@@ -182,15 +182,8 @@ grafana:
   persistence:
     enabled: true
     size: 10Gi
-  datasources:
-    datasources.yaml:
-      apiVersion: 1
-      datasources:
-        - name: Prometheus
-          type: prometheus
-          url: http://prometheus-operated:9090
-          access: proxy
-          isDefault: true
+  # Datasources are auto-configured by kube-prometheus-stack
+  # No need to explicitly define them to avoid conflicts
   dashboardProviders:
     dashboardproviders.yaml:
       apiVersion: 1
@@ -206,9 +199,17 @@ grafana:
   dashboards:
     default:
       kubernetes-cluster:
-        url: https://raw.githubusercontent.com/prometheus-community/helm-charts/main/charts/kube-prometheus-stack/charts/grafana/dashboards/kubernetes-cluster.json
-      kubernetes-nodes:
-        url: https://raw.githubusercontent.com/prometheus-community/helm-charts/main/charts/kube-prometheus-stack/charts/grafana/dashboards/kubernetes-nodes.json
+        gnetId: 6417
+        revision: 1
+        datasource: Prometheus
+      kubernetes-pods:
+        gnetId: 15760
+        revision: 1
+        datasource: Prometheus
+      k8s-dashboard:
+        gnetId: 15661
+        revision: 1
+        datasource: Prometheus
 
 alertmanager:
   enabled: true
@@ -232,16 +233,93 @@ nodeExporter:
 EOF
 
     print_info "Installing kube-prometheus-stack (Prometheus + Grafana)..."
+    print_warning "This may take 5-15 minutes. Monitoring progress..."
+    echo ""
 
+    # Run helm install in background
     helm upgrade --install prometheus-grafana \
         prometheus-community/kube-prometheus-stack \
         --namespace "$PROMETHEUS_NAMESPACE" \
         --values /tmp/prometheus-values.yaml \
         --version "$PROMETHEUS_CHART_VERSION" \
         --wait \
-        --timeout 10m
+        --timeout 15m > /tmp/helm-install.log 2>&1 &
 
-    print_success "Prometheus and Grafana deployed successfully"
+    HELM_PID=$!
+
+    # Give helm a moment to start
+    sleep 2
+
+    # Verify the process started
+    if ! kill -0 $HELM_PID 2>/dev/null; then
+        print_error "Helm process failed to start or exited immediately"
+        cat /tmp/helm-install.log
+        exit 1
+    fi
+
+    # Monitor progress while helm is running
+    print_info "Monitoring pod deployment progress (PID: $HELM_PID)..."
+    echo ""
+
+    local last_status=""
+    local iteration=0
+    while true; do
+        # Check if helm process is still running
+        if ! kill -0 $HELM_PID 2>/dev/null; then
+            break
+        fi
+        # Get pod status summary
+        local pod_info
+        pod_info=$(kubectl get pods -n "$PROMETHEUS_NAMESPACE" 2>/dev/null | tail -n +2 | awk '{print $3}' | sort | uniq -c | tr '\n' ' ')
+
+        # Get running/total pod count
+        local total_pods ready_pods
+        total_pods=$(kubectl get pods -n "$PROMETHEUS_NAMESPACE" --no-headers 2>/dev/null | wc -l)
+        ready_pods=$(kubectl get pods -n "$PROMETHEUS_NAMESPACE" --no-headers 2>/dev/null | grep "Running" | awk '{print $2}' | awk -F'/' '$1==$2' | wc -l)
+
+        if [[ "$pod_info" != "$last_status" && -n "$pod_info" ]]; then
+            local timestamp
+            timestamp=$(date +"%H:%M:%S")
+            echo ""
+            print_status "[$timestamp] Ready: $ready_pods/$total_pods pods | Status: $pod_info"
+            last_status="$pod_info"
+        elif [ $((iteration % 6)) -eq 0 ]; then
+            # Show heartbeat every 30 seconds even if no change
+            echo -ne "."
+        fi
+
+        iteration=$((iteration + 1))
+        sleep 5
+    done
+
+    # Wait for helm to complete and check exit status
+    wait $HELM_PID
+    HELM_EXIT_CODE=$?
+
+    echo ""
+    echo ""
+
+    if [ $HELM_EXIT_CODE -eq 0 ]; then
+        print_success "Helm installation completed successfully"
+
+        # Show final pod status
+        print_info "Final pod status:"
+        kubectl get pods -n "$PROMETHEUS_NAMESPACE" -o wide 2>/dev/null | sed 's/^/  /'
+        echo ""
+
+        print_success "Prometheus and Grafana deployed successfully"
+    else
+        print_error "Helm installation failed or timed out"
+        echo ""
+        print_info "Current pod status:"
+        kubectl get pods -n "$PROMETHEUS_NAMESPACE" 2>/dev/null | sed 's/^/  /'
+        echo ""
+        print_info "Helm installation logs:"
+        cat /tmp/helm-install.log
+        echo ""
+        print_warning "You can check pod logs with: kubectl logs -n $PROMETHEUS_NAMESPACE <pod-name>"
+        exit 1
+    fi
     echo ""
 }
 
