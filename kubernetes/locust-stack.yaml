@@ -126,7 +126,6 @@ spec:
   - port: 8090
     targetPort: 8090
     name: prometheus
-  sessionAffinity: ClientIP
 ---
 apiVersion: v1
 kind: Service

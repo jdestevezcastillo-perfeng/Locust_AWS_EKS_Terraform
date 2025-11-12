@@ -60,6 +60,7 @@ kubernetes/*.yaml.bak
 *.tmp
 *.bak
 PRIVATE_OWNER_NOTES.md
+SCRIPT.md
 
 # AWS
 .aws/
