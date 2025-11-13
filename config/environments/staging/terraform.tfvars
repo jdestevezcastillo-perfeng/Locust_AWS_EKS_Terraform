@@ -7,7 +7,7 @@ public_subnet_cidrs  = ["10.10.1.0/24", "10.10.2.0/24"]
 private_subnet_cidrs = ["10.10.10.0/24", "10.10.20.0/24"]
 
 cluster_name                         = "locust-staging-cluster"
-kubernetes_version                   = "1.28"
+kubernetes_version                   = "1.34"
 cluster_endpoint_public_access       = true
 cluster_endpoint_public_access_cidrs = ["203.0.113.0/32"]  # Replace with real office/VPN CIDR
 

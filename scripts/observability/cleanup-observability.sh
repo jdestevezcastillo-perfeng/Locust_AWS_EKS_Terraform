@@ -25,6 +25,10 @@ source "${PROJECT_ROOT}/scripts/common.sh"
 # Configuration
 NAMESPACE_MONITORING="monitoring"
 FORCE_CLEANUP=false
+PROM_HELM_RELEASE="prometheus-grafana"
+VICTORIA_HELM_RELEASE="victoria-metrics"
+LOKI_HELM_RELEASE="loki"
+TEMPO_HELM_RELEASE="tempo"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -44,7 +48,7 @@ done
 clear
 print_header "OBSERVABILITY CLEANUP"
 echo ""
-print_warning "This will remove all Prometheus, Grafana, and monitoring infrastructure"
+print_warning "This will remove Prometheus, Grafana, VictoriaMetrics, Loki, Tempo, and all monitoring infrastructure"
 echo ""
 
 # Confirm deletion
@@ -62,14 +66,21 @@ fi
 echo ""
 print_section "Removing Observability Components"
 
-# Remove Helm release
-print_info "Removing Prometheus and Grafana Helm release..."
-if helm list -n "$NAMESPACE_MONITORING" | grep -q prometheus-grafana; then
-    helm uninstall prometheus-grafana -n "$NAMESPACE_MONITORING"
-    print_success "Helm release removed"
-else
-    print_warning "Prometheus Grafana Helm release not found"
-fi
+remove_release() {
+    local release=$1
+    if helm status "$release" -n "$NAMESPACE_MONITORING" &>/dev/null; then
+        helm uninstall "$release" -n "$NAMESPACE_MONITORING"
+        print_success "Helm release '$release' removed"
+    else
+        print_warning "Helm release '$release' not found"
+    fi
+}
+
+print_info "Removing Helm releases..."
+remove_release "$PROM_HELM_RELEASE"
+remove_release "$VICTORIA_HELM_RELEASE"
+remove_release "$LOKI_HELM_RELEASE"
+remove_release "$TEMPO_HELM_RELEASE"
 
 echo ""
 

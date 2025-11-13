@@ -1,10 +1,10 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.13.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.20"
     }
   }
 }
@@ -477,6 +477,7 @@ resource "aws_eks_node_group" "main" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = var.node_group_name
   node_role_arn   = aws_iam_role.eks_node_group_role.arn
+  ami_type        = "AL2023_x86_64_STANDARD"
 
   # Use private subnets for worker nodes (security best practice)
   subnet_ids = [
@@ -763,7 +764,6 @@ resource "aws_iam_role_policy_attachment" "ebs_csi_driver_policy" {
 resource "aws_eks_addon" "ebs_csi_driver" {
   cluster_name             = aws_eks_cluster.main.name
   addon_name               = "aws-ebs-csi-driver"
-  addon_version            = "v1.37.0-eksbuild.1"  # Compatible with EKS 1.28
   service_account_role_arn = aws_iam_role.ebs_csi_driver_role.arn
 
   resolve_conflicts_on_create = "OVERWRITE"

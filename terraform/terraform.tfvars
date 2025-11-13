@@ -9,7 +9,7 @@ private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]
 
 # EKS Cluster Configuration
 cluster_name                           = "locust-dev-cluster"
-kubernetes_version                     = "1.28"
+kubernetes_version                     = "1.34"
 cluster_endpoint_public_access         = true
 cluster_endpoint_public_access_cidrs   = ["0.0.0.0/0"]  # Restrict to your IP in production
 

@@ -2,11 +2,11 @@
 
 ################################################################################
 #                                                                              #
-#  Prometheus & Grafana Observability Setup Script                           #
+#  Observability Setup Script                                                 #
 #  Location: scripts/observability/setup-prometheus-grafana.sh               #
 #                                                                              #
-#  This script deploys Prometheus and Grafana to monitor a Locust cluster    #
-#  on AWS EKS. Run this AFTER the main deployment (deploy.sh) is complete.  #
+#  This script deploys Prometheus, Grafana, VictoriaMetrics, Loki, and Tempo #
+#  to monitor a Locust cluster on AWS EKS. Run this AFTER deploy.sh.         #
 #                                                                              #
 #  Prerequisites:                                                             #
 #  - AWS EKS cluster already deployed                                        #
@@ -37,8 +37,17 @@ GRAFANA_NAMESPACE="$NAMESPACE_MONITORING"
 LOCUST_NAMESPACE="locust"
 
 # Helm chart versions
-PROMETHEUS_CHART_VERSION="79.4.1"
+PROMETHEUS_CHART_VERSION="79.5.0"
 GRAFANA_CHART_VERSION="7.0.8"
+VICTORIA_CHART_VERSION="0.25.4"
+LOKI_CHART_VERSION="2.10.3"
+TEMPO_CHART_VERSION="1.24.0"
+
+PROM_HELM_RELEASE="prometheus-grafana"
+VICTORIA_HELM_RELEASE="victoria-metrics"
+LOKI_HELM_RELEASE="loki"
+TEMPO_HELM_RELEASE="tempo"
+PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-prometheus-prometheus"
 
 # Grafana configuration
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin123}"
@@ -93,6 +102,11 @@ check_kubectl() {
     print_success "Connected to cluster: $CLUSTER_NAME"
 }
 
+get_tf_output() {
+    local output_name=$1
+    terraform -chdir="${PROJECT_ROOT}/terraform" output -raw "$output_name" 2>/dev/null || echo ""
+}
+
 # Function to create monitoring namespace
 create_namespace() {
     print_section "Creating Monitoring Namespace"
@@ -113,6 +127,7 @@ add_helm_repos() {
 
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo add grafana https://grafana.github.io/helm-charts
+    helm repo add victoria-metrics https://victoriametrics.github.io/helm-charts
     helm repo update
 
     print_success "Helm repositories added and updated"
@@ -120,6 +135,56 @@ add_helm_repos() {
 }
 
 # Function to deploy Prometheus
+deploy_victoriametrics() {
+    print_section "Deploying VictoriaMetrics (long-term metrics storage)"
+
+    local victoriametrics_role_arn
+    victoriametrics_role_arn=$(get_tf_output "victoriametrics_role_arn")
+
+    cat > /tmp/victoriametrics-values.yaml <<EOF
+serviceAccount:
+  create: true
+  name: victoriametrics
+EOF
+
+    if [ -n "$victoriametrics_role_arn" ]; then
+        cat >> /tmp/victoriametrics-values.yaml <<EOF
+  annotations:
+    eks.amazonaws.com/role-arn: "${victoriametrics_role_arn}"
+EOF
+    else
+        cat >> /tmp/victoriametrics-values.yaml <<'EOF'
+  annotations: {}
+EOF
+        print_warning "victoriametrics_role_arn Terraform output not found; continuing without IRSA."
+    fi
+
+    cat >> /tmp/victoriametrics-values.yaml <<'EOF'
+server:
+  retentionPeriod: 90d
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  persistentVolume:
+    enabled: true
+    size: 100Gi
+EOF
+
+    helm upgrade --install "$VICTORIA_HELM_RELEASE" \
+        victoria-metrics/victoria-metrics-single \
+        --namespace "$PROMETHEUS_NAMESPACE" \
+        --version "$VICTORIA_CHART_VERSION" \
+        --values /tmp/victoriametrics-values.yaml \
+        --wait --timeout 10m
+
+    print_success "VictoriaMetrics release deployed"
+    echo ""
+}
+
 deploy_prometheus() {
     print_section "Deploying Prometheus"
 
@@ -169,6 +234,13 @@ prometheus:
             regex: ([^:]+)(?::\d+)?;(\d+)
             replacement: \$1:\$2
             target_label: __address__
+    remoteWrite:
+      - url: "http://$VICTORIA_HELM_RELEASE-victoria-metrics-single-server.$PROMETHEUS_NAMESPACE.svc.cluster.local:8428/api/v1/write"
+        writeRelabelConfigs: []
+        queueConfig:
+          capacity: 50000
+          maxShards: 4
+          maxSamplesPerSend: 10000
 
 prometheus-node-exporter:
   enabled: true
@@ -179,6 +251,36 @@ prometheus-pushgateway:
 grafana:
   enabled: true
   adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
+  service:
+    type: LoadBalancer
+    port: 80
+  sidecar:
+    datasources:
+      enabled: true
+  additionalDataSources:
+    - name: VictoriaMetrics
+      uid: victoria-metrics
+      type: prometheus
+      access: proxy
+      url: "http://$VICTORIA_HELM_RELEASE-victoria-metrics-single-server.$PROMETHEUS_NAMESPACE.svc.cluster.local:8428"
+      isDefault: false
+      jsonData:
+        timeInterval: 30s
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: "http://$LOKI_HELM_RELEASE-loki.$PROMETHEUS_NAMESPACE.svc.cluster.local:3100"
+      isDefault: false
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: "http://$TEMPO_HELM_RELEASE-tempo.$PROMETHEUS_NAMESPACE.svc.cluster.local:3200"
+      jsonData:
+        httpMethod: GET
+        tracesToLogs:
+          datasourceUid: loki
   persistence:
     enabled: true
     size: 10Gi
@@ -237,7 +339,7 @@ EOF
     echo ""
 
     # Run helm install in background
-    helm upgrade --install prometheus-grafana \
+    helm upgrade --install "$PROM_HELM_RELEASE" \
         prometheus-community/kube-prometheus-stack \
         --namespace "$PROMETHEUS_NAMESPACE" \
         --values /tmp/prometheus-values.yaml \
@@ -320,6 +422,63 @@ EOF
         print_warning "You can check pod logs with: kubectl logs -n $PROMETHEUS_NAMESPACE <pod-name>"
         exit 1
     fi
+    echo ""
+}
+
+deploy_loki() {
+    print_section "Deploying Loki (logs)"
+
+    cat > /tmp/loki-values.yaml <<'EOF'
+loki:
+  persistence:
+    enabled: true
+    size: 50Gi
+prometheus:
+  enabled: false
+grafana:
+  enabled: false
+fluent-bit:
+  enabled: false
+promtail:
+  enabled: true
+  pipelineStages: []
+  extraScrapeConfigs: []
+EOF
+
+    helm upgrade --install "$LOKI_HELM_RELEASE" \
+        grafana/loki-stack \
+        --namespace "$PROMETHEUS_NAMESPACE" \
+        --version "$LOKI_CHART_VERSION" \
+        --values /tmp/loki-values.yaml \
+        --wait --timeout 10m
+
+    print_success "Loki release deployed"
+    echo ""
+}
+
+deploy_tempo() {
+    print_section "Deploying Tempo (traces)"
+
+    cat > /tmp/tempo-values.yaml <<'EOF'
+persistence:
+  enabled: true
+  size: 40Gi
+tempo:
+  retention: 168h
+tempoQuery:
+  enabled: true
+  service:
+    port: 16686
+EOF
+
+    helm upgrade --install "$TEMPO_HELM_RELEASE" \
+        grafana/tempo \
+        --namespace "$PROMETHEUS_NAMESPACE" \
+        --version "$TEMPO_CHART_VERSION" \
+        --values /tmp/tempo-values.yaml \
+        --wait --timeout 10m
+
+    print_success "Tempo release deployed"
     echo ""
 }
 
@@ -527,14 +686,27 @@ show_access_info() {
     print_section "Access Information"
 
     print_info "Prometheus:"
-    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/prometheus-grafana 9090:9090"
+    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$PROM_SERVICE_NAME 9090:9090"
     print_status "  Access: http://localhost:9090"
     echo ""
 
     print_info "Grafana:"
-    print_status "  Port-forward: kubectl port-forward -n $GRAFANA_NAMESPACE svc/prometheus-grafana 3000:80"
+    print_status "  Port-forward: kubectl port-forward -n $GRAFANA_NAMESPACE svc/$PROM_HELM_RELEASE 3000:80"
     print_status "  Access: http://localhost:3000"
     print_status "  Default credentials: admin / $GRAFANA_ADMIN_PASSWORD"
+    echo ""
+
+    print_info "VictoriaMetrics:"
+    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$VICTORIA_HELM_RELEASE-victoria-metrics-single-server 8428:8428"
+    print_status "  Access: http://localhost:8428"
+    echo ""
+
+    print_info "Loki:"
+    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$LOKI_HELM_RELEASE-loki 3100:3100"
+    echo ""
+
+    print_info "Tempo:"
+    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$TEMPO_HELM_RELEASE-tempo 3200:3200"
     echo ""
 
     print_warning "Note: Update GRAFANA_ADMIN_PASSWORD environment variable for production deployments"
@@ -546,24 +718,45 @@ verify_deployment() {
     print_section "Verifying Deployment"
 
     print_info "Checking Prometheus..."
-    if kubectl get deployment prometheus-grafana-prometheus -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
+    if kubectl get deployment $PROM_HELM_RELEASE-prometheus -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
         print_success "Prometheus deployed successfully"
     else
         print_warning "Prometheus deployment still initializing..."
     fi
 
     print_info "Checking Grafana..."
-    if kubectl get deployment prometheus-grafana -n "$GRAFANA_NAMESPACE" &> /dev/null; then
+    if kubectl get deployment $PROM_HELM_RELEASE -n "$GRAFANA_NAMESPACE" &> /dev/null; then
         print_success "Grafana deployed successfully"
     else
         print_warning "Grafana deployment still initializing..."
     fi
 
     print_info "Checking AlertManager..."
-    if kubectl get statefulset prometheus-grafana-alertmanager -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
+    if kubectl get statefulset $PROM_HELM_RELEASE-alertmanager -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
         print_success "AlertManager deployed successfully"
     else
         print_warning "AlertManager deployment still initializing..."
+    fi
+
+    print_info "Checking VictoriaMetrics..."
+    if kubectl get statefulset $VICTORIA_HELM_RELEASE-victoria-metrics-single-server -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
+        print_success "VictoriaMetrics deployed successfully"
+    else
+        print_warning "VictoriaMetrics statefulset still initializing..."
+    fi
+
+    print_info "Checking Loki..."
+    if kubectl get statefulset $LOKI_HELM_RELEASE-loki -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
+        print_success "Loki deployed successfully"
+    else
+        print_warning "Loki statefulset still initializing..."
+    fi
+
+    print_info "Checking Tempo..."
+    if kubectl get statefulset $TEMPO_HELM_RELEASE-tempo -n "$PROMETHEUS_NAMESPACE" &> /dev/null; then
+        print_success "Tempo deployed successfully"
+    else
+        print_warning "Tempo statefulset still initializing..."
     fi
 
     echo ""
@@ -610,32 +803,41 @@ EOF
 
 # Main execution
 main() {
-    print_info "Phase 1/7: Checking Prerequisites..."
+    print_info "Phase 1/10: Checking Prerequisites..."
     check_helm
     check_kubectl
     echo ""
 
-    print_info "Phase 2/7: Creating Monitoring Namespace..."
+    print_info "Phase 2/10: Creating Monitoring Namespace..."
     create_namespace
 
     if [ "$SKIP_HELM_INIT" = false ]; then
-        print_info "Phase 3/7: Adding Helm Repositories..."
+        print_info "Phase 3/10: Adding Helm Repositories..."
         add_helm_repos
     else
         print_warning "Skipping Helm repository setup..."
         echo ""
     fi
 
-    print_info "Phase 4/7: Deploying Prometheus and Grafana..."
+    print_info "Phase 4/10: Deploying VictoriaMetrics..."
+    deploy_victoriametrics
+
+    print_info "Phase 5/10: Deploying Prometheus and Grafana..."
     deploy_prometheus
 
-    print_info "Phase 5/7: Registering Locust metrics..."
+    print_info "Phase 6/10: Deploying Loki..."
+    deploy_loki
+
+    print_info "Phase 7/10: Deploying Tempo..."
+    deploy_tempo
+
+    print_info "Phase 8/10: Registering Locust metrics..."
     apply_locust_servicemonitor
 
-    print_info "Phase 6/7: Deploying Locust Dashboards..."
+    print_info "Phase 9/10: Deploying Locust Dashboards..."
     deploy_locust_dashboards
 
-    print_info "Phase 7/7: Saving Configuration..."
+    print_info "Phase 10/10: Saving Configuration..."
     save_configuration
 
     # Calculate total time
@@ -656,12 +858,12 @@ main() {
 
     print_section "Next Steps"
     print_step "1. Wait 2-3 minutes for all pods to be ready"
-    print_step "2. Port-forward Grafana: kubectl port-forward -n $GRAFANA_NAMESPACE svc/prometheus-grafana 3000:80"
+    print_step "2. Port-forward Grafana: kubectl port-forward -n $GRAFANA_NAMESPACE svc/$PROM_HELM_RELEASE 3000:80"
     print_step "3. Access Grafana at http://localhost:3000"
     print_step "4. Login with admin / $GRAFANA_ADMIN_PASSWORD"
-    print_step "5. Add Prometheus datasource (usually auto-configured)"
-    print_step "6. Import Locust dashboard"
-    print_step "7. Monitor your load tests in real-time"
+    print_step "5. Grafana already includes Prometheus, VictoriaMetrics, Loki, and Tempo datasources"
+    print_step "6. Import or customize dashboards as needed"
+    print_step "7. Monitor metrics, logs, and traces in real-time"
     echo ""
 
     verify_deployment
@@ -678,14 +880,17 @@ main() {
     print_info "  kubectl logs -n $GRAFANA_NAMESPACE -l app.kubernetes.io/name=grafana"
     echo ""
     print_status "Check Prometheus targets:"
-    print_info "  kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/prometheus-grafana 9090:9090"
+    print_info "  kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$PROM_SERVICE_NAME 9090:9090"
     print_info "  Then visit: http://localhost:9090/targets"
     echo ""
 
     print_section "Cleanup"
     print_warning "To remove observability stack, run:"
     echo ""
-    print_status "  helm uninstall prometheus-grafana -n $PROMETHEUS_NAMESPACE"
+    print_status "  helm uninstall $PROM_HELM_RELEASE -n $PROMETHEUS_NAMESPACE"
+    print_status "  helm uninstall $VICTORIA_HELM_RELEASE -n $PROMETHEUS_NAMESPACE"
+    print_status "  helm uninstall $LOKI_HELM_RELEASE -n $PROMETHEUS_NAMESPACE"
+    print_status "  helm uninstall $TEMPO_HELM_RELEASE -n $PROMETHEUS_NAMESPACE"
     print_status "  kubectl delete namespace $PROMETHEUS_NAMESPACE"
     echo ""
 

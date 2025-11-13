@@ -106,6 +106,7 @@ run_terraform() {
 
     print_success "Infrastructure ready"
     print_info "Cluster: ${CLUSTER_NAME}"
+    print_info "API endpoint: ${CLUSTER_ENDPOINT}"
     print_info "ECR: ${ECR_REPOSITORY_URL}"
 }
 

@@ -94,10 +94,6 @@ validate_aws_credentials() {
     return 0
 }
 
-get_aws_account_id() {
-    aws sts get-caller-identity --query Account --output text
-}
-
 get_aws_region() {
     aws configure get region 2>/dev/null || echo "us-east-1"
 }

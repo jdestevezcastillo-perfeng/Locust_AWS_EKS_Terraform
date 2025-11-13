@@ -7,7 +7,7 @@ public_subnet_cidrs  = ["10.20.1.0/24", "10.20.2.0/24"]
 private_subnet_cidrs = ["10.20.10.0/23", "10.20.12.0/23"]
 
 cluster_name                         = "locust-prod-cluster"
-kubernetes_version                   = "1.28"
+kubernetes_version                   = "1.34"
 cluster_endpoint_public_access       = true
 cluster_endpoint_public_access_cidrs = ["198.51.100.0/24"]  # Replace with corporate CIDR
 

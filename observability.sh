@@ -30,6 +30,11 @@ source "${PROJECT_ROOT}/scripts/common.sh"
 NAMESPACE_MONITORING="monitoring"
 OBSERVABILITY_DIR="${PROJECT_ROOT}/scripts/observability"
 ACCESS_REPORT_FILE="${PROJECT_ROOT}/reports/observability-access.md"
+PROM_HELM_RELEASE="prometheus-grafana"
+VICTORIA_HELM_RELEASE="victoria-metrics"
+LOKI_HELM_RELEASE="loki"
+TEMPO_HELM_RELEASE="tempo"
+PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-prometheus-prometheus"
 
 # Load observability environment if available
 load_observability_env() {
@@ -49,8 +54,11 @@ generate_access_report() {
     local locust_namespace="${LOCUST_NAMESPACE:-locust}"
     local grafana_password="${GRAFANA_ADMIN_PASSWORD:-admin123}"
 
-    local grafana_port_forward="kubectl port-forward -n ${grafana_namespace} svc/prometheus-grafana 3000:80"
-    local prometheus_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/prometheus-grafana 9090:9090"
+    local grafana_port_forward="kubectl port-forward -n ${grafana_namespace} svc/${PROM_HELM_RELEASE} 3000:80"
+    local prometheus_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/${PROM_SERVICE_NAME} 9090:9090"
+    local victoria_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/${VICTORIA_HELM_RELEASE}-victoria-metrics-single-server 8428:8428"
+    local loki_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/${LOKI_HELM_RELEASE}-loki 3100:3100"
+    local tempo_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/${TEMPO_HELM_RELEASE}-tempo 3200:3200"
 
     local locust_host
     locust_host=$(get_loadbalancer_ip "$locust_namespace" "locust-master" || true)
@@ -78,6 +86,9 @@ _Last updated: ${timestamp}_
 | Grafana | http://localhost:3000 | Port-forward: \`${grafana_port_forward}\`. Credentials: admin / ${grafana_password}. |
 | Prometheus | http://localhost:9090 | Port-forward: \`${prometheus_port_forward}\`. Targets view: \`http://localhost:9090/targets\`. |
 | Locust UI | ${locust_url} | ${locust_note} |
+| VictoriaMetrics | http://localhost:8428 | Port-forward: \`${victoria_port_forward}\`. Query path: \`/select/\`. |
+| Loki | http://localhost:3100 | Port-forward: \`${loki_port_forward}\`. Explore log queries via Grafana datasource `Loki`. |
+| Tempo | http://localhost:3200 | Port-forward: \`${tempo_port_forward}\`. Grafana datasource `Tempo`. |
 EOF
 
     print_success "Access instructions saved to ${ACCESS_REPORT_FILE#$PROJECT_ROOT/}"

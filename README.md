@@ -12,7 +12,7 @@ Production-grade yet compact toolkit for running distributed [Locust](https://lo
 ## Quick Start
 
 1. **Install prerequisites**
-   - `terraform` ≥ 1.0, `aws-cli` ≥ 2, `kubectl` ≥ 1.28, `docker`, and `jq`
+   - `terraform` ≥ 1.13, `aws-cli` ≥ 2.31, `kubectl` ≥ 1.34, `docker` ≥ 29, and `jq` ≥ 1.8
    - Configure AWS credentials: `aws configure`
 
 2. **Choose an environment**
@@ -66,7 +66,13 @@ sed "s|__LOCUST_IMAGE__|$IMAGE|g" kubernetes/locust-stack.yaml | kubectl apply -
 
 ## Observability (Optional)
 
-Run `./observability.sh setup` after the core deployment to install the kube-prometheus stack in the `monitoring` namespace. The script checks Helm availability, deploys Prometheus + Grafana, and (optionally) applies a Locust ServiceMonitor if you drop one at `kubernetes/locust-servicemonitor.yaml`. Use `./observability.sh port-forward` for quick local access.
+Run `./observability.sh setup` after the core deployment to install the full stack (Prometheus + Grafana, VictoriaMetrics for long-term metrics, Loki+Promtail for logs, and Tempo for traces) in the `monitoring` namespace. The script validates Helm/kubectl, wires Prometheus remote-write to VictoriaMetrics, provisions Grafana datasources for every backend, and (optionally) applies a Locust `ServiceMonitor` when `kubernetes/locust-servicemonitor.yaml` is present. For local access you can use `./observability.sh port-forward --both` or port-forward directly:
+
+- `kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80` → Grafana UI (admin/admin123 by default)
+- `kubectl port-forward -n monitoring svc/prometheus-grafana-kube-prometheus-prometheus 9090:9090` → Prometheus targets
+- `kubectl port-forward -n monitoring svc/victoria-metrics-victoria-metrics-single-server 8428:8428` → VictoriaMetrics query API
+- `kubectl port-forward -n monitoring svc/loki-loki 3100:3100` → Loki log API
+- `kubectl port-forward -n monitoring svc/tempo-tempo 3200:3200` → Tempo trace API
 
 ## Troubleshooting Essentials
 

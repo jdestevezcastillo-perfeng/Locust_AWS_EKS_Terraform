@@ -1,7 +1,7 @@
 ################################################################################
 # Runtime - Python image for Locust
 ################################################################################
-FROM python:3.10-slim
+FROM python:3.13-slim
 
 # Metadata labels
 LABEL maintainer="sre-team@example.com"
@@ -16,7 +16,7 @@ WORKDIR /app
 
 # Install Python dependencies
 # Locust + Prometheus metrics exporter
-RUN pip install --no-cache-dir 'locust>=2.42.2,<3.0.0' 'prometheus-client>=0.17.0'
+RUN pip install --no-cache-dir 'locust>=2.42.2,<3.0.0' 'prometheus-client>=0.23.1,<1.0.0'
 
 # Copy application code
 COPY --chown=locust:locust tests/ ./tests/
