@@ -49,6 +49,12 @@ LOKI_HELM_RELEASE="loki"
 TEMPO_HELM_RELEASE="tempo"
 PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-prometheus-prometheus"
 
+# VictoriaMetrics resource overrides
+VICTORIA_CPU_REQUEST="${VICTORIA_CPU_REQUEST:-500m}"
+VICTORIA_MEMORY_REQUEST="${VICTORIA_MEMORY_REQUEST:-512Mi}"
+VICTORIA_CPU_LIMIT="${VICTORIA_CPU_LIMIT:-2}"
+VICTORIA_MEMORY_LIMIT="${VICTORIA_MEMORY_LIMIT:-2Gi}"
+
 # Grafana configuration
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin123}"
 GRAFANA_DOMAIN="${GRAFANA_DOMAIN:-grafana.local}"
@@ -134,12 +140,330 @@ add_helm_repos() {
     echo ""
 }
 
+# Function to deploy AWS Cluster Autoscaler
+deploy_cluster_autoscaler() {
+    print_section "Deploying AWS Cluster Autoscaler"
+
+    # Get cluster name from Terraform output
+    local cluster_name
+    cluster_name=$(get_tf_output "cluster_name")
+
+    if [ -z "$cluster_name" ]; then
+        print_warning "Could not retrieve cluster name from Terraform. Using default from config..."
+        cluster_name="${CLUSTER_NAME:-locust-dev-cluster}"
+    fi
+
+    print_info "Deploying Cluster Autoscaler for cluster: $cluster_name"
+
+    # Create Cluster Autoscaler deployment
+    cat > /tmp/cluster-autoscaler.yaml <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler
+  labels:
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["events", "endpoints"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames: ["cluster-autoscaler"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["watch", "list", "get", "update"]
+  - apiGroups: [""]
+    resources:
+      - "namespaces"
+      - "pods"
+      - "services"
+      - "replicationcontrollers"
+      - "persistentvolumeclaims"
+      - "persistentvolumes"
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["extensions"]
+    resources: ["replicasets", "daemonsets"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["watch", "list"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "replicasets", "daemonsets"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["batch", "extensions"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resourceNames: ["cluster-autoscaler"]
+    resources: ["leases"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["cluster-autoscaler-status", "cluster-autoscaler-priority-expander"]
+    verbs: ["delete", "get", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler
+  labels:
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      serviceAccountName: cluster-autoscaler
+      containers:
+        - image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.31.0
+          name: cluster-autoscaler
+          resources:
+            limits:
+              cpu: 100m
+              memory: 600Mi
+            requests:
+              cpu: 100m
+              memory: 600Mi
+          command:
+            - ./cluster-autoscaler
+            - --v=4
+            - --stderrthreshold=info
+            - --cloud-provider=aws
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/${cluster_name}
+            - --balance-similar-node-groups
+            - --skip-nodes-with-system-pods=false
+          volumeMounts:
+            - name: ssl-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              readOnly: true
+          imagePullPolicy: Always
+      volumes:
+        - name: ssl-certs
+          hostPath:
+            path: /etc/ssl/certs/ca-bundle.crt
+      nodeSelector:
+        workload: monitoring
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: monitoring
+          effect: NoSchedule
+EOF
+
+    kubectl apply -f /tmp/cluster-autoscaler.yaml
+
+    print_success "Cluster Autoscaler deployed"
+    print_info "The autoscaler will automatically scale node groups based on pod pending state"
+    echo ""
+}
+
+# Function to deploy nginx Ingress Controller
+deploy_nginx_ingress() {
+    print_section "Deploying nginx Ingress Controller"
+
+    # Add nginx Ingress Helm repo if not already added
+    helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true
+    helm repo update
+
+    # Create nginx Ingress values
+    cat > /tmp/nginx-ingress-values.yaml <<'EOF'
+controller:
+  service:
+    type: LoadBalancer
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  # Enable metrics for Prometheus scraping
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+  # Configure admission webhooks with tolerations for tainted nodes
+  admissionWebhooks:
+    patch:
+      nodeSelector:
+        workload: monitoring
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: monitoring
+          effect: NoSchedule
+EOF
+
+    print_info "Installing nginx Ingress Controller..."
+    helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+        --namespace ingress-nginx \
+        --create-namespace \
+        --values /tmp/nginx-ingress-values.yaml \
+        --wait --timeout 5m
+
+    print_success "nginx Ingress Controller deployed"
+    print_info "Single LoadBalancer created for all monitoring tools"
+    echo ""
+}
+
 # Function to deploy Prometheus
 deploy_victoriametrics() {
     print_section "Deploying VictoriaMetrics (long-term metrics storage)"
 
     local victoriametrics_role_arn
     victoriametrics_role_arn=$(get_tf_output "victoriametrics_role_arn")
+
+    local victoriametrics_storage_class
+    victoriametrics_storage_class="${VICTORIA_STORAGE_CLASS:-}"
+
+    if [ -z "$victoriametrics_storage_class" ]; then
+        victoriametrics_storage_class=$(kubectl get storageclass \
+            -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' \
+            2>/dev/null | awk 'NF {print $1; exit}' || true)
+    fi
+
+    if [ -z "$victoriametrics_storage_class" ]; then
+        victoriametrics_storage_class=$(kubectl get storageclass \
+            -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' \
+            2>/dev/null | awk 'NF {print $1; exit}' || true)
+    fi
+
+    local available_storage_classes
+    available_storage_classes=$(kubectl get storageclass \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+        2>/dev/null | awk 'NF' || true)
+
+    if [ -z "$victoriametrics_storage_class" ] && [ -n "$available_storage_classes" ]; then
+        if printf '%s\n' "$available_storage_classes" | grep -Fxq "gp3"; then
+            victoriametrics_storage_class="gp3"
+            print_info "No default StorageClass detected; preferring 'gp3'. Export VICTORIA_STORAGE_CLASS to override."
+        fi
+    fi
+
+    if [ -z "$victoriametrics_storage_class" ] && [ -n "$available_storage_classes" ]; then
+        local storage_class_count
+        storage_class_count=$(printf '%s\n' "$available_storage_classes" | wc -l | tr -d '[:space:]')
+
+        if [ "$storage_class_count" -eq 1 ]; then
+            victoriametrics_storage_class=$(printf '%s\n' "$available_storage_classes")
+            print_warning "No default StorageClass detected; using '${victoriametrics_storage_class}'. Export VICTORIA_STORAGE_CLASS to override."
+        else
+            for candidate in gp3 gp3-csi gp2 gp2-csi gp-standard gp2-standard gp3-standard ebs-sc standard; do
+                if printf '%s\n' "$available_storage_classes" | grep -Fxq "$candidate"; then
+                    victoriametrics_storage_class="$candidate"
+                    print_warning "No default StorageClass detected; falling back to '${victoriametrics_storage_class}'. Export VICTORIA_STORAGE_CLASS to override."
+                    break
+                fi
+            done
+
+            if [ -z "$victoriametrics_storage_class" ]; then
+                victoriametrics_storage_class=$(printf '%s\n' "$available_storage_classes" | head -n 1)
+                print_warning "No default StorageClass detected; selecting first available '${victoriametrics_storage_class}'. Export VICTORIA_STORAGE_CLASS to choose explicitly."
+            fi
+        fi
+    fi
+
+    if [ -z "$victoriametrics_storage_class" ]; then
+        print_error "Unable to detect a default StorageClass for VictoriaMetrics PVC."
+        if [ -n "$available_storage_classes" ]; then
+            print_info "Detected StorageClasses:"
+            printf '  - %s\n' $available_storage_classes
+        fi
+        print_info "Set VICTORIA_STORAGE_CLASS or label a StorageClass as default and re-run the setup."
+        exit 1
+    fi
+
+    print_info "Using storage class '${victoriametrics_storage_class}' for VictoriaMetrics PVC"
 
     cat > /tmp/victoriametrics-values.yaml <<EOF
 serviceAccount:
@@ -159,19 +483,29 @@ EOF
         print_warning "victoriametrics_role_arn Terraform output not found; continuing without IRSA."
     fi
 
-    cat >> /tmp/victoriametrics-values.yaml <<'EOF'
+    cat >> /tmp/victoriametrics-values.yaml <<EOF
 server:
+  service:
+    type: ClusterIP
   retentionPeriod: 90d
   resources:
     requests:
-      cpu: 500m
-      memory: 1Gi
+      cpu: ${VICTORIA_CPU_REQUEST}
+      memory: ${VICTORIA_MEMORY_REQUEST}
     limits:
-      cpu: "2"
-      memory: 4Gi
+      cpu: "${VICTORIA_CPU_LIMIT}"
+      memory: ${VICTORIA_MEMORY_LIMIT}
   persistentVolume:
     enabled: true
     size: 100Gi
+    storageClassName: "${victoriametrics_storage_class}"
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
 EOF
 
     helm upgrade --install "$VICTORIA_HELM_RELEASE" \
@@ -191,11 +525,24 @@ deploy_prometheus() {
     # Create Prometheus values file
     cat > /tmp/prometheus-values.yaml <<EOF
 prometheus:
+  service:
+    type: ClusterIP
   prometheusSpec:
     retention: 30d
+    # Configure Prometheus to work behind /prometheus subpath
+    externalUrl: http://INGRESS_HOSTNAME/prometheus
+    routePrefix: /
+    nodeSelector:
+      workload: monitoring
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: monitoring
+        effect: NoSchedule
     storageSpec:
       volumeClaimTemplate:
         spec:
+          storageClassName: gp2
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
@@ -244,6 +591,16 @@ prometheus:
 
 prometheus-node-exporter:
   enabled: true
+  # DaemonSet runs on all nodes, so add tolerations for both taints
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: locust
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
 
 prometheus-pushgateway:
   enabled: false
@@ -251,8 +608,30 @@ prometheus-pushgateway:
 grafana:
   enabled: true
   adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
+  # Configure Grafana to work behind /grafana subpath
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/grafana"
+      serve_from_sub_path: true
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
+  # Admission webhook job also needs tolerations
+  admissionWebhooks:
+    patch:
+      nodeSelector:
+        workload: monitoring
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: monitoring
+          effect: NoSchedule
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 80
   sidecar:
     datasources:
@@ -284,6 +663,7 @@ grafana:
   persistence:
     enabled: true
     size: 10Gi
+    storageClassName: gp2
   # Datasources are auto-configured by kube-prometheus-stack
   # No need to explicitly define them to avoid conflicts
   dashboardProviders:
@@ -315,6 +695,19 @@ grafana:
 
 alertmanager:
   enabled: true
+  service:
+    type: ClusterIP
+  alertmanagerSpec:
+    # Configure AlertManager to work behind /alertmanager subpath
+    externalUrl: http://INGRESS_HOSTNAME/alertmanager
+    routePrefix: /
+    nodeSelector:
+      workload: monitoring
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: monitoring
+        effect: NoSchedule
   config:
     global:
       resolve_timeout: 5m
@@ -327,11 +720,46 @@ alertmanager:
     receivers:
       - name: 'default'
 
-kubeStateMetrics:
-  enabled: true
+kube-state-metrics:
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
 
 nodeExporter:
   enabled: true
+  # DaemonSet runs on all nodes, so add tolerations for both taints
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: locust
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
+
+# Prometheus Operator needs tolerations
+prometheusOperator:
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
+  admissionWebhooks:
+    patch:
+      nodeSelector:
+        workload: monitoring
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: monitoring
+          effect: NoSchedule
 EOF
 
     print_info "Installing kube-prometheus-stack (Prometheus + Grafana)..."
@@ -433,6 +861,14 @@ loki:
   persistence:
     enabled: true
     size: 50Gi
+    storageClassName: gp2
+  nodeSelector:
+    workload: monitoring
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
 prometheus:
   enabled: false
 grafana:
@@ -441,6 +877,16 @@ fluent-bit:
   enabled: false
 promtail:
   enabled: true
+  # Promtail is a DaemonSet that collects logs from all nodes
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: locust
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: monitoring
+      effect: NoSchedule
   pipelineStages: []
   extraScrapeConfigs: []
 EOF
@@ -463,11 +909,21 @@ deploy_tempo() {
 persistence:
   enabled: true
   size: 40Gi
+  storageClassName: gp2
+# Node selector and tolerations at top level for Tempo pods
+nodeSelector:
+  workload: monitoring
+tolerations:
+  - key: workload
+    operator: Equal
+    value: monitoring
+    effect: NoSchedule
 tempo:
   retention: 168h
 tempoQuery:
   enabled: true
   service:
+    type: ClusterIP
     port: 16686
 EOF
 
@@ -479,6 +935,79 @@ EOF
         --wait --timeout 10m
 
     print_success "Tempo release deployed"
+    echo ""
+}
+
+# Function to deploy Ingress resources for monitoring tools
+deploy_ingress() {
+    print_section "Deploying Ingress for Monitoring Tools"
+
+    # Create Ingress resource
+    cat > /tmp/monitoring-ingress.yaml <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitoring-ingress
+  namespace: monitoring
+  annotations:
+    # Strip path prefix before forwarding to backend
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # Set larger timeouts for long-running queries
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      # Grafana - Dashboard UI
+      - path: /grafana(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: prometheus-grafana-grafana
+            port:
+              number: 80
+      # Prometheus - Metrics query UI
+      - path: /prometheus(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: prometheus-grafana-kube-pr-prometheus
+            port:
+              number: 9090
+      # VictoriaMetrics - Long-term metrics storage UI
+      - path: /victoria(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: victoria-metrics-victoria-metrics-single-server
+            port:
+              number: 8428
+      # AlertManager - Alert management UI
+      - path: /alertmanager(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: prometheus-grafana-kube-pr-alertmanager
+            port:
+              number: 9093
+      # Tempo - Distributed tracing UI
+      - path: /tempo(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: tempo-tempo-query
+            port:
+              number: 16686
+EOF
+
+    # Apply Ingress resource
+    kubectl apply -f /tmp/monitoring-ingress.yaml
+
+    print_success "Ingress resource deployed"
+    print_info "All monitoring tools accessible via single LoadBalancer URL with different paths"
     echo ""
 }
 
@@ -681,35 +1210,78 @@ EOF
     echo ""
 }
 
-# Function to setup port forwarding info
+# Function to get Ingress LoadBalancer hostname
+get_ingress_url() {
+    # Wait a moment for LoadBalancer to provision
+    sleep 3
+
+    local hostname=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+
+    if [ -z "$hostname" ] || [ "$hostname" = "null" ]; then
+        echo "pending"
+    else
+        echo "http://${hostname}"
+    fi
+}
+
+# Function to show Ingress access information
 show_access_info() {
-    print_section "Access Information"
+    print_section "nginx Ingress Access URLs"
 
-    print_info "Prometheus:"
-    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$PROM_SERVICE_NAME 9090:9090"
-    print_status "  Access: http://localhost:9090"
+    print_info "Fetching Ingress LoadBalancer URL (this may take 1-2 minutes for AWS to provision)..."
     echo ""
 
-    print_info "Grafana:"
-    print_status "  Port-forward: kubectl port-forward -n $GRAFANA_NAMESPACE svc/$PROM_HELM_RELEASE 3000:80"
-    print_status "  Access: http://localhost:3000"
-    print_status "  Default credentials: admin / $GRAFANA_ADMIN_PASSWORD"
+    INGRESS_BASE_URL=$(get_ingress_url)
+
+    if [ "$INGRESS_BASE_URL" = "pending" ]; then
+        print_warning "Ingress LoadBalancer still provisioning..."
+        print_status "  Check status: kubectl get svc -n ingress-nginx ingress-nginx-controller -w"
+        echo ""
+        print_info "Once ready, access monitoring tools at:"
+    else
+        print_success "Ingress LoadBalancer ready!"
+        echo ""
+        print_info "Access all monitoring tools via single LoadBalancer URL:"
+    fi
+
+    echo ""
+    print_info "Grafana (Dashboards & Visualization):"
+    print_status "  URL: ${INGRESS_BASE_URL}/grafana"
+    print_status "  Credentials: admin / $GRAFANA_ADMIN_PASSWORD"
     echo ""
 
-    print_info "VictoriaMetrics:"
-    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$VICTORIA_HELM_RELEASE-victoria-metrics-single-server 8428:8428"
-    print_status "  Access: http://localhost:8428"
+    print_info "Prometheus (Metrics Query & Browser):"
+    print_status "  URL: ${INGRESS_BASE_URL}/prometheus"
     echo ""
 
-    print_info "Loki:"
-    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$LOKI_HELM_RELEASE-loki 3100:3100"
+    print_info "VictoriaMetrics (Long-term Metrics Storage):"
+    print_status "  URL: ${INGRESS_BASE_URL}/victoria"
     echo ""
 
-    print_info "Tempo:"
-    print_status "  Port-forward: kubectl port-forward -n $PROMETHEUS_NAMESPACE svc/$TEMPO_HELM_RELEASE-tempo 3200:3200"
+    print_info "AlertManager (Alert Management):"
+    print_status "  URL: ${INGRESS_BASE_URL}/alertmanager"
     echo ""
 
-    print_warning "Note: Update GRAFANA_ADMIN_PASSWORD environment variable for production deployments"
+    print_info "Tempo (Distributed Tracing UI):"
+    print_status "  URL: ${INGRESS_BASE_URL}/tempo"
+    echo ""
+
+    print_info "Loki (Logs - API only, access via Grafana datasource):"
+    print_status "  Internal: http://$LOKI_HELM_RELEASE-loki.$PROMETHEUS_NAMESPACE.svc.cluster.local:3100"
+    echo ""
+
+    print_info "Locust (Load Testing UI - Separate LoadBalancer):"
+    LOCUST_URL=$(kubectl get svc -n locust locust-master -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+    if [ -n "$LOCUST_URL" ] && [ "$LOCUST_URL" != "null" ]; then
+        print_status "  URL: http://${LOCUST_URL}:8089"
+    else
+        print_status "  URL: pending (run: kubectl get svc -n locust locust-master -w)"
+    fi
+    echo ""
+
+    print_warning "💰 Cost Savings: Using 1 nginx LoadBalancer instead of 5 separate LoadBalancers (~\$72/month saved!)"
+    print_warning "🔒 Security: All services are publicly accessible. Restrict access via AWS security groups for production!"
+    print_warning "🔑 Update GRAFANA_ADMIN_PASSWORD for production deployments (current: $GRAFANA_ADMIN_PASSWORD)"
     echo ""
 }
 
@@ -803,41 +1375,50 @@ EOF
 
 # Main execution
 main() {
-    print_info "Phase 1/10: Checking Prerequisites..."
+    print_info "Phase 1/13: Checking Prerequisites..."
     check_helm
     check_kubectl
     echo ""
 
-    print_info "Phase 2/10: Creating Monitoring Namespace..."
+    print_info "Phase 2/13: Creating Monitoring Namespace..."
     create_namespace
 
     if [ "$SKIP_HELM_INIT" = false ]; then
-        print_info "Phase 3/10: Adding Helm Repositories..."
+        print_info "Phase 3/13: Adding Helm Repositories..."
         add_helm_repos
     else
         print_warning "Skipping Helm repository setup..."
         echo ""
     fi
 
-    print_info "Phase 4/10: Deploying VictoriaMetrics..."
+    print_info "Phase 4/13: Deploying AWS Cluster Autoscaler..."
+    deploy_cluster_autoscaler
+
+    print_info "Phase 5/13: Deploying nginx Ingress Controller..."
+    deploy_nginx_ingress
+
+    print_info "Phase 6/13: Deploying VictoriaMetrics..."
     deploy_victoriametrics
 
-    print_info "Phase 5/10: Deploying Prometheus and Grafana..."
+    print_info "Phase 7/13: Deploying Prometheus and Grafana..."
     deploy_prometheus
 
-    print_info "Phase 6/10: Deploying Loki..."
+    print_info "Phase 8/13: Deploying Loki..."
     deploy_loki
 
-    print_info "Phase 7/10: Deploying Tempo..."
+    print_info "Phase 9/13: Deploying Tempo..."
     deploy_tempo
 
-    print_info "Phase 8/10: Registering Locust metrics..."
+    print_info "Phase 10/13: Deploying Ingress Routes..."
+    deploy_ingress
+
+    print_info "Phase 11/13: Registering Locust metrics..."
     apply_locust_servicemonitor
 
-    print_info "Phase 9/10: Deploying Locust Dashboards..."
+    print_info "Phase 12/13: Deploying Locust Dashboards..."
     deploy_locust_dashboards
 
-    print_info "Phase 10/10: Saving Configuration..."
+    print_info "Phase 13/13: Saving Configuration..."
     save_configuration
 
     # Calculate total time

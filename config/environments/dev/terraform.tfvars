@@ -12,12 +12,20 @@ cluster_endpoint_public_access       = true
 cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]  # Overridden during deploy for safety
 
 node_group_name    = "locust-dev-nodes"
-node_instance_type = "t3.small"
+node_instance_type = "c7i-flex.large"
 node_capacity_type = "SPOT"
 node_disk_size     = 20
-desired_capacity   = 3
-min_capacity       = 3
-max_capacity       = 10
+desired_capacity   = 2
+min_capacity       = 2
+max_capacity       = 6
+
+monitoring_node_group_name   = "monitoring-dev-nodes"
+monitoring_instance_type     = "m7i-flex.large"
+monitoring_capacity_type     = "SPOT"
+monitoring_disk_size         = 30
+monitoring_desired_capacity  = 2
+monitoring_min_capacity      = 2
+monitoring_max_capacity      = 4
 
 ecr_repository_name = "locust-dev-load-tests"
 ecr_scan_on_push    = false

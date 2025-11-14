@@ -74,6 +74,11 @@ Run `./observability.sh setup` after the core deployment to install the full sta
 - `kubectl port-forward -n monitoring svc/loki-loki 3100:3100` → Loki log API
 - `kubectl port-forward -n monitoring svc/tempo-tempo 3200:3200` → Tempo trace API
 
+Clusters with no default StorageClass now fall back to `gp3` automatically (if present). If your
+cluster uses a custom class name, export `VICTORIA_STORAGE_CLASS=<storage-class-name>` before running
+`./observability.sh setup` so the VictoriaMetrics PVC can bind immediately and Helm does not time out
+waiting for volumes.
+
 ## Troubleshooting Essentials
 
 - `terraform plan` inside `terraform/` if you need to inspect pending changes.

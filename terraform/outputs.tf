@@ -202,3 +202,12 @@ output "victoriametrics_role_arn" {
   description = "IAM role ARN for VictoriaMetrics S3 access"
   value       = aws_iam_role.victoriametrics_role.arn
 }
+
+################################################################################
+# Cluster Autoscaler Outputs
+################################################################################
+
+output "cluster_autoscaler_role_arn" {
+  description = "IAM role ARN for Cluster Autoscaler"
+  value       = aws_iam_role.cluster_autoscaler_role.arn
+}

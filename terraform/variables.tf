@@ -75,13 +75,13 @@ variable "node_group_name" {
 }
 
 variable "node_instance_type" {
-  description = "EC2 instance type for worker nodes"
+  description = "EC2 instance type for Locust worker nodes"
   type        = string
-  default     = "t3.medium"
+  default     = "c7i-flex.large"
 
   validation {
-    condition     = can(regex("^t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)$", var.node_instance_type))
-    error_message = "Node instance type must be a valid t3 instance (t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge)."
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.node_instance_type))
+    error_message = "Node instance type must be a valid t3, c7i-flex, or m7i-flex instance."
   }
 }
 
@@ -132,6 +132,77 @@ variable "max_capacity" {
   validation {
     condition     = var.max_capacity >= 1 && var.max_capacity <= 100
     error_message = "Maximum capacity must be between 1 and 100."
+  }
+}
+
+################################################################################
+# EKS Monitoring Node Group Variables
+################################################################################
+
+variable "monitoring_node_group_name" {
+  description = "Name of the EKS monitoring node group"
+  type        = string
+  default     = "monitoring-nodes"
+}
+
+variable "monitoring_instance_type" {
+  description = "EC2 instance type for monitoring nodes (VictoriaMetrics, Prometheus, Loki, Tempo)"
+  type        = string
+  default     = "m7i-flex.large"
+
+  validation {
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.monitoring_instance_type))
+    error_message = "Monitoring instance type must be a valid t3, c7i-flex, or m7i-flex instance."
+  }
+}
+
+variable "monitoring_capacity_type" {
+  description = "Type of capacity for monitoring nodes. Valid values: ON_DEMAND, SPOT"
+  type        = string
+  default     = "SPOT"
+
+  validation {
+    condition     = contains(["ON_DEMAND", "SPOT"], var.monitoring_capacity_type)
+    error_message = "Monitoring capacity type must be either ON_DEMAND or SPOT."
+  }
+}
+
+variable "monitoring_disk_size" {
+  description = "Disk size in GB for monitoring nodes"
+  type        = number
+  default     = 30
+}
+
+variable "monitoring_desired_capacity" {
+  description = "Desired number of monitoring nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.monitoring_desired_capacity >= 1 && var.monitoring_desired_capacity <= 50
+    error_message = "Monitoring desired capacity must be between 1 and 50."
+  }
+}
+
+variable "monitoring_min_capacity" {
+  description = "Minimum number of monitoring nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.monitoring_min_capacity >= 1 && var.monitoring_min_capacity <= 50
+    error_message = "Monitoring minimum capacity must be between 1 and 50."
+  }
+}
+
+variable "monitoring_max_capacity" {
+  description = "Maximum number of monitoring nodes"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.monitoring_max_capacity >= 1 && var.monitoring_max_capacity <= 50
+    error_message = "Monitoring maximum capacity must be between 1 and 50."
   }
 }
 

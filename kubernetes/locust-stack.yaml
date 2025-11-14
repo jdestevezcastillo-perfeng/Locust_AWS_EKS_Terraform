@@ -101,6 +101,13 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
+      nodeSelector:
+        workload: locust
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: locust
+        effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -208,6 +215,13 @@ spec:
           limits:
             cpu: 2000m
             memory: 1Gi
+      nodeSelector:
+        workload: locust
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: locust
+        effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

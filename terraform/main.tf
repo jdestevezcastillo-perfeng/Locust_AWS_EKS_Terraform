@@ -502,11 +502,21 @@ resource "aws_eks_node_group" "main" {
   # Labels for pod scheduling
   labels = {
     role        = "locust-worker-node"
+    workload    = "locust"
     environment = var.environment
   }
 
+  # Taint to ensure only Locust workloads run on these nodes
+  taint {
+    key    = "workload"
+    value  = "locust"
+    effect = "NO_SCHEDULE"
+  }
+
   tags = {
-    Name = "${var.cluster_name}-node-group"
+    Name                                        = "${var.cluster_name}-node-group"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+    "k8s.io/cluster-autoscaler/enabled"         = "true"
   }
 
   depends_on = [
@@ -517,6 +527,69 @@ resource "aws_eks_node_group" "main" {
   ]
 
   # Ignore changes to scaling config (managed by HPA/Cluster Autoscaler)
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size]
+  }
+}
+
+################################################################################
+# EKS Monitoring Node Group
+################################################################################
+
+resource "aws_eks_node_group" "monitoring" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = var.monitoring_node_group_name
+  node_role_arn   = aws_iam_role.eks_node_group_role.arn
+  ami_type        = "AL2023_x86_64_STANDARD"
+
+  # Use private subnets for monitoring nodes (security best practice)
+  subnet_ids = [
+    aws_subnet.private_subnet_1.id,
+    aws_subnet.private_subnet_2.id
+  ]
+
+  scaling_config {
+    desired_size = var.monitoring_desired_capacity
+    max_size     = var.monitoring_max_capacity
+    min_size     = var.monitoring_min_capacity
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  instance_types = [var.monitoring_instance_type]
+  capacity_type  = var.monitoring_capacity_type
+  disk_size      = var.monitoring_disk_size
+
+  # Labels for pod scheduling
+  labels = {
+    role        = "monitoring-node"
+    workload    = "monitoring"
+    environment = var.environment
+  }
+
+  # Taint to ensure only monitoring workloads run on these nodes
+  taint {
+    key    = "workload"
+    value  = "monitoring"
+    effect = "NO_SCHEDULE"
+  }
+
+  tags = {
+    Name                                        = "${var.cluster_name}-monitoring-node-group"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+    "k8s.io/cluster-autoscaler/enabled"         = "true"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_container_registry_policy,
+    aws_iam_role_policy.eks_node_cloudwatch_policy
+  ]
+
+  # Ignore changes to scaling config (managed by Cluster Autoscaler)
   lifecycle {
     ignore_changes = [scaling_config[0].desired_size]
   }
@@ -769,12 +842,157 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
+  # Configure tolerations so CSI driver can run on tainted nodes
+  configuration_values = jsonencode({
+    controller = {
+      tolerations = [
+        {
+          key      = "workload"
+          operator = "Equal"
+          value    = "locust"
+          effect   = "NoSchedule"
+        },
+        {
+          key      = "workload"
+          operator = "Equal"
+          value    = "monitoring"
+          effect   = "NoSchedule"
+        }
+      ]
+    }
+    node = {
+      tolerations = [
+        {
+          key      = "workload"
+          operator = "Equal"
+          value    = "locust"
+          effect   = "NoSchedule"
+        },
+        {
+          key      = "workload"
+          operator = "Equal"
+          value    = "monitoring"
+          effect   = "NoSchedule"
+        }
+      ]
+    }
+  })
+
   tags = {
     Name = "${var.cluster_name}-ebs-csi-driver"
   }
 
   depends_on = [
     aws_eks_node_group.main,
+    aws_eks_node_group.monitoring,
     aws_iam_role_policy_attachment.ebs_csi_driver_policy
+  ]
+}
+
+################################################################################
+# IAM Role for Cluster Autoscaler (IRSA)
+################################################################################
+
+resource "aws_iam_role" "cluster_autoscaler_role" {
+  name_prefix = "${var.cluster_name}-ca-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.eks_oidc.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:sub" = "system:serviceaccount:kube-system:cluster-autoscaler"
+            "${replace(aws_iam_openid_connect_provider.eks_oidc.url, "https://", "")}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.cluster_name}-cluster-autoscaler-role"
+  }
+}
+
+# IAM policy for Cluster Autoscaler
+resource "aws_iam_role_policy" "cluster_autoscaler_policy" {
+  name_prefix = "${var.cluster_name}-ca-policy-"
+  role        = aws_iam_role.cluster_autoscaler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances",
+          "autoscaling:DescribeLaunchConfigurations",
+          "autoscaling:DescribeScalingActivities",
+          "autoscaling:DescribeTags",
+          "ec2:DescribeImages",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:GetInstanceTypesFromInstanceRequirements",
+          "eks:DescribeNodegroup"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:SetDesiredCapacity",
+          "autoscaling:TerminateInstanceInAutoScalingGroup"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# EKS addon for CoreDNS with tolerations for tainted nodes
+resource "aws_eks_addon" "coredns" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "coredns"
+
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  # Configure tolerations so CoreDNS can run on tainted nodes
+  configuration_values = jsonencode({
+    tolerations = [
+      {
+        key      = "workload"
+        operator = "Equal"
+        value    = "locust"
+        effect   = "NoSchedule"
+      },
+      {
+        key      = "workload"
+        operator = "Equal"
+        value    = "monitoring"
+        effect   = "NoSchedule"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.cluster_name}-coredns"
+  }
+
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_eks_node_group.monitoring
   ]
 }
