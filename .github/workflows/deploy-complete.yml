@@ -153,35 +153,43 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Access Information
-          if [ "${{ needs.application.result }}" == "success" ]; then
+          if [ "${{ needs.application.result }}" == "success" ] || [ "${{ needs.monitoring.result }}" == "success" ]; then
             echo "## 🌐 Access Information" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Locust Web UI" >> $GITHUB_STEP_SUMMARY
-            echo "Check the Application workflow logs for the LoadBalancer URL" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Or use port-forward:" >> $GITHUB_STEP_SUMMARY
-            echo '```bash' >> $GITHUB_STEP_SUMMARY
-            echo "kubectl port-forward -n locust svc/locust-master 8089:8089" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
 
-          if [ "${{ needs.monitoring.result }}" == "success" ]; then
-            echo "### Monitoring Dashboards" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Grafana:**" >> $GITHUB_STEP_SUMMARY
-            echo '```bash' >> $GITHUB_STEP_SUMMARY
-            echo "kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80" >> $GITHUB_STEP_SUMMARY
-            echo "# Access: http://localhost:3000" >> $GITHUB_STEP_SUMMARY
-            echo "# Username: admin" >> $GITHUB_STEP_SUMMARY
-            echo "# Password: (check GitHub secrets)" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Prometheus:**" >> $GITHUB_STEP_SUMMARY
-            echo '```bash' >> $GITHUB_STEP_SUMMARY
-            echo "kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090" >> $GITHUB_STEP_SUMMARY
-            echo "# Access: http://localhost:9090" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            # Get Ingress LoadBalancer URL
+            INGRESS_LB=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || \
+              kubectl get svc -n ingress-nginx ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+
+            if [ "$INGRESS_LB" != "pending" ]; then
+              echo "### 🔗 Ingress LoadBalancer" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Base URL:** http://$INGRESS_LB" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+              echo "| 📊 Grafana | http://$INGRESS_LB/grafana |" >> $GITHUB_STEP_SUMMARY
+              echo "| 📈 Prometheus | http://$INGRESS_LB/prometheus |" >> $GITHUB_STEP_SUMMARY
+              echo "| 💾 VictoriaMetrics | http://$INGRESS_LB/victoria |" >> $GITHUB_STEP_SUMMARY
+              echo "| 🚨 AlertManager | http://$INGRESS_LB/alertmanager |" >> $GITHUB_STEP_SUMMARY
+              echo "| 🔍 Tempo | http://$INGRESS_LB/tempo |" >> $GITHUB_STEP_SUMMARY
+              echo "| 🐝 Locust | http://$INGRESS_LB/locust |" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Grafana Credentials:** admin / (check GitHub secrets)" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "💰 **Cost Savings:** Using 1 Ingress LoadBalancer saves ~\$90/month" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Status:** ⏳ LoadBalancer provisioning..." >> $GITHUB_STEP_SUMMARY
+              echo '```bash' >> $GITHUB_STEP_SUMMARY
+              echo "# Check status with:" >> $GITHUB_STEP_SUMMARY
+              echo "kubectl get svc -n ingress-nginx ingress-nginx-controller -w" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "# Get access URLs:" >> $GITHUB_STEP_SUMMARY
+              echo "./observability.sh url" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
 

@@ -956,6 +956,18 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+
+    # OPTIONAL SECURITY: Basic Authentication (uncomment to enable)
+    # Requires creating a secret with htpasswd data:
+    #   htpasswd -c auth monitoring-user
+    #   kubectl create secret generic basic-auth --from-file=auth -n monitoring
+    # nginx.ingress.kubernetes.io/auth-type: basic
+    # nginx.ingress.kubernetes.io/auth-secret: basic-auth
+    # nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required - Monitoring Stack'
+
+    # OPTIONAL SECURITY: IP Whitelisting (uncomment and set your IPs)
+    # Comma-separated list of CIDR blocks (e.g., "1.2.3.4/32,10.0.0.0/8")
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "0.0.0.0/0"
 spec:
   ingressClassName: nginx
   rules:
@@ -1008,6 +1020,65 @@ EOF
 
     print_success "Ingress resource deployed"
     print_info "All monitoring tools accessible via single LoadBalancer URL with different paths"
+    echo ""
+}
+
+# Function to deploy Ingress for Locust
+deploy_locust_ingress() {
+    print_section "Deploying Ingress for Locust Load Testing"
+
+    # Check if locust namespace exists
+    if ! kubectl get namespace locust &> /dev/null; then
+        print_warning "Locust namespace not found, skipping Locust Ingress deployment"
+        return 0
+    fi
+
+    # Create Ingress resource for Locust
+    cat > /tmp/locust-ingress.yaml <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: locust-ingress
+  namespace: locust
+  annotations:
+    # Strip path prefix before forwarding to backend
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # Set larger timeouts for load testing
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+
+    # OPTIONAL SECURITY: Basic Authentication (uncomment to enable)
+    # Requires creating a secret with htpasswd data:
+    #   htpasswd -c auth locust-user
+    #   kubectl create secret generic basic-auth --from-file=auth -n locust
+    # nginx.ingress.kubernetes.io/auth-type: basic
+    # nginx.ingress.kubernetes.io/auth-secret: basic-auth
+    # nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required - Locust Load Testing'
+
+    # OPTIONAL SECURITY: IP Whitelisting (uncomment and set your IPs)
+    # Comma-separated list of CIDR blocks (e.g., "1.2.3.4/32,10.0.0.0/8")
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "0.0.0.0/0"
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      # Locust - Load testing web UI and metrics
+      - path: /locust(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: locust-master
+            port:
+              number: 8089
+EOF
+
+    # Apply Ingress resource
+    kubectl apply -f /tmp/locust-ingress.yaml
+
+    print_success "Locust Ingress resource deployed"
+    print_info "Locust UI accessible at <LoadBalancer-URL>/locust"
     echo ""
 }
 
@@ -1411,6 +1482,7 @@ main() {
 
     print_info "Phase 10/13: Deploying Ingress Routes..."
     deploy_ingress
+    deploy_locust_ingress
 
     print_info "Phase 11/13: Registering Locust metrics..."
     apply_locust_servicemonitor

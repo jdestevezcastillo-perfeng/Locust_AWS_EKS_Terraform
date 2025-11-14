@@ -122,7 +122,7 @@ metadata:
     app: locust
     component: master
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector:
     app: locust
     component: master
