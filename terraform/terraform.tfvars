@@ -13,14 +13,23 @@ kubernetes_version                     = "1.34"
 cluster_endpoint_public_access         = true
 cluster_endpoint_public_access_cidrs   = ["0.0.0.0/0"]  # Restrict to your IP in production
 
-# EKS Node Group Configuration
-node_group_name      = "locust-dev-nodes"
-node_instance_type   = "t3.small"
+# EKS Locust Master Node Group Configuration
+locust_master_node_group_name = "locust-master-dev-nodes"
+locust_master_instance_type   = "t3.micro"  # Ultra-low budget: ~$8/month spot
+locust_master_capacity_type   = "SPOT"
+locust_master_disk_size       = 20
+locust_master_desired_capacity = 1
+locust_master_min_capacity     = 1
+locust_master_max_capacity     = 2  # HA failover only
+
+# EKS Locust Worker Node Group Configuration
+node_group_name      = "locust-worker-dev-nodes"
+node_instance_type   = "t3.medium"  # Ultra-low budget: ~$30/month spot for 3 nodes
 node_capacity_type   = "SPOT"  # Using SPOT for cost savings (~70% discount)
 node_disk_size       = 20
 desired_capacity     = 3
 min_capacity         = 3
-max_capacity         = 10
+max_capacity         = 10  # Can scale up to 10 nodes based on HPA
 
 # ECR Configuration
 ecr_repository_name = "locust-dev-load-tests"

@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Disable AWS CLI pager to prevent interactive prompts during automation
+export AWS_PAGER=""
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 

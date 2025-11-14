@@ -102,11 +102,11 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
       nodeSelector:
-        workload: locust
+        workload: locust-master
       tolerations:
       - key: workload
         operator: Equal
-        value: locust
+        value: locust-master
         effect: NoSchedule
       securityContext:
         runAsNonRoot: true
@@ -216,11 +216,11 @@ spec:
             cpu: 2000m
             memory: 1Gi
       nodeSelector:
-        workload: locust
+        workload: locust-worker
       tolerations:
       - key: workload
         operator: Equal
-        value: locust
+        value: locust-worker
         effect: NoSchedule
       securityContext:
         runAsNonRoot: true

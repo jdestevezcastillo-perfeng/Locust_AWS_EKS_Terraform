@@ -71,19 +71,36 @@ output "cluster_certificate_authority_data" {
 # EKS Node Group Outputs
 ################################################################################
 
-output "node_group_id" {
-  description = "EKS node group ID"
-  value       = aws_eks_node_group.main.id
+# Locust Master Node Group
+output "locust_master_node_group_id" {
+  description = "EKS Locust master node group ID"
+  value       = aws_eks_node_group.locust_master.id
 }
 
-output "node_group_arn" {
-  description = "ARN of the EKS node group"
-  value       = aws_eks_node_group.main.arn
+output "locust_master_node_group_arn" {
+  description = "ARN of the EKS Locust master node group"
+  value       = aws_eks_node_group.locust_master.arn
 }
 
-output "node_group_status" {
-  description = "Status of the EKS node group"
-  value       = aws_eks_node_group.main.status
+output "locust_master_node_group_status" {
+  description = "Status of the EKS Locust master node group"
+  value       = aws_eks_node_group.locust_master.status
+}
+
+# Locust Worker Node Group
+output "locust_worker_node_group_id" {
+  description = "EKS Locust worker node group ID"
+  value       = aws_eks_node_group.locust_worker.id
+}
+
+output "locust_worker_node_group_arn" {
+  description = "ARN of the EKS Locust worker node group"
+  value       = aws_eks_node_group.locust_worker.arn
+}
+
+output "locust_worker_node_group_status" {
+  description = "Status of the EKS Locust worker node group"
+  value       = aws_eks_node_group.locust_worker.status
 }
 
 output "node_security_group_id" {

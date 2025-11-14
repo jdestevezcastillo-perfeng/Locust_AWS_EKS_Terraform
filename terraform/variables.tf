@@ -68,20 +68,89 @@ variable "cluster_endpoint_public_access_cidrs" {
 # EKS Node Group Variables
 ################################################################################
 
-variable "node_group_name" {
-  description = "Name of the EKS node group"
+# Locust Master Node Group
+variable "locust_master_node_group_name" {
+  description = "Name of the EKS Locust master node group"
   type        = string
-  default     = "locust-nodes"
+  default     = "locust-master-nodes"
+}
+
+variable "locust_master_instance_type" {
+  description = "EC2 instance type for Locust master node"
+  type        = string
+  default     = "t3.micro"
+
+  validation {
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.locust_master_instance_type))
+    error_message = "Master instance type must be a valid t3, c7i-flex, or m7i-flex instance."
+  }
+}
+
+variable "locust_master_capacity_type" {
+  description = "Type of capacity for Locust master node. Valid values: ON_DEMAND, SPOT"
+  type        = string
+  default     = "SPOT"
+
+  validation {
+    condition     = contains(["ON_DEMAND", "SPOT"], var.locust_master_capacity_type)
+    error_message = "Master capacity type must be either ON_DEMAND or SPOT."
+  }
+}
+
+variable "locust_master_disk_size" {
+  description = "Disk size in GB for Locust master node"
+  type        = number
+  default     = 20
+}
+
+variable "locust_master_desired_capacity" {
+  description = "Desired number of Locust master nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.locust_master_desired_capacity >= 1 && var.locust_master_desired_capacity <= 2
+    error_message = "Master desired capacity must be 1 or 2."
+  }
+}
+
+variable "locust_master_min_capacity" {
+  description = "Minimum number of Locust master nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.locust_master_min_capacity >= 1 && var.locust_master_min_capacity <= 2
+    error_message = "Master min capacity must be 1 or 2."
+  }
+}
+
+variable "locust_master_max_capacity" {
+  description = "Maximum number of Locust master nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.locust_master_max_capacity >= 1 && var.locust_master_max_capacity <= 2
+    error_message = "Master max capacity must be 1 or 2 (for HA failover only)."
+  }
+}
+
+# Locust Worker Node Group
+variable "node_group_name" {
+  description = "Name of the EKS Locust worker node group"
+  type        = string
+  default     = "locust-worker-nodes"
 }
 
 variable "node_instance_type" {
   description = "EC2 instance type for Locust worker nodes"
   type        = string
-  default     = "c7i-flex.large"
+  default     = "t3.medium"
 
   validation {
     condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.node_instance_type))
-    error_message = "Node instance type must be a valid t3, c7i-flex, or m7i-flex instance."
+    error_message = "Worker instance type must be a valid t3, c7i-flex, or m7i-flex instance."
   }
 }
 

@@ -2,10 +2,50 @@
 
 set -euo pipefail
 
+# Disable AWS CLI pager to prevent interactive prompts during automation
+export AWS_PAGER=""
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 
 source "${PROJECT_ROOT}/scripts/common.sh"
+
+wait_for_eni_cleanup() {
+    print_section "Waiting for Network Interfaces Cleanup"
+
+    local vpc_id region max_wait=300 elapsed=0
+    vpc_id=$(get_tf_output "vpc_id" 2>/dev/null)
+    region=$(get_tf_output "aws_region" 2>/dev/null)
+    region=${region:-$(get_aws_region)}
+
+    if [ -z "$vpc_id" ]; then
+        print_warning "VPC ID not found in Terraform outputs - skipping ENI check"
+        return 0
+    fi
+
+    print_info "Checking for remaining ENIs in VPC ${vpc_id}..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        local eni_count
+        eni_count=$(aws ec2 describe-network-interfaces \
+            --filters "Name=vpc-id,Values=${vpc_id}" "Name=status,Values=in-use" \
+            --region "${region}" \
+            --query 'length(NetworkInterfaces)' \
+            --output text 2>/dev/null || echo "0")
+
+        if [ "$eni_count" = "0" ] || [ -z "$eni_count" ]; then
+            print_success "All ENIs released from VPC"
+            return 0
+        fi
+
+        print_info "Waiting for ${eni_count} ENI(s) to be released... (${elapsed}s/${max_wait}s)"
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    print_warning "Timeout waiting for ENIs - Terraform destroy may fail"
+    print_info "Run: aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=${vpc_id} --region ${region}"
+}
 
 delete_k8s_resources() {
     print_section "Deleting Kubernetes Resources"
@@ -14,13 +54,40 @@ delete_k8s_resources() {
         return
     fi
 
-    kubectl delete namespace locust --ignore-not-found --wait=false || \
-        print_warning "Namespace deletion reported issues"
+    # Step 1: Delete LoadBalancer services explicitly to trigger ENI cleanup
+    print_info "Deleting LoadBalancer services..."
 
-    wait_for_condition 180 \
-        "! kubectl get namespace locust &>/dev/null" \
-        "locust namespace removal" || \
-        print_warning "Namespace still terminating in background"
+    # Delete nginx Ingress LoadBalancer (blocks subnet deletion)
+    if kubectl get svc ingress-nginx-controller -n ingress-nginx &>/dev/null; then
+        print_info "Deleting nginx Ingress LoadBalancer..."
+        kubectl delete svc ingress-nginx-controller -n ingress-nginx --timeout=5m || \
+            print_warning "Failed to delete ingress-nginx LoadBalancer"
+    fi
+
+    # Delete any Locust LoadBalancers (shouldn't exist with ClusterIP, but just in case)
+    if kubectl get svc locust-master -n locust &>/dev/null; then
+        local svc_type
+        svc_type=$(kubectl get svc locust-master -n locust -o jsonpath='{.spec.type}')
+        if [ "$svc_type" = "LoadBalancer" ]; then
+            print_info "Deleting Locust LoadBalancer..."
+            kubectl delete svc locust-master -n locust --timeout=5m || \
+                print_warning "Failed to delete locust LoadBalancer"
+        fi
+    fi
+
+    # Step 2: Delete namespaces with proper waiting
+    print_info "Deleting namespaces..."
+
+    # Delete ingress-nginx namespace (critical - was missing in original!)
+    kubectl delete namespace ingress-nginx --ignore-not-found --wait=true --timeout=10m || \
+        print_warning "ingress-nginx namespace deletion reported issues"
+
+    # Delete locust namespace
+    kubectl delete namespace locust --ignore-not-found --wait=true --timeout=10m || \
+        print_warning "locust namespace deletion reported issues"
+
+    # Step 3: Wait for ENIs to be released before Terraform destroy
+    wait_for_eni_cleanup
 }
 
 delete_ecr_images() {
