@@ -113,11 +113,86 @@ Edit `scripts/observability/setup-prometheus-grafana.sh` and uncomment the `whit
 
 ## Troubleshooting Essentials
 
+### General Issues
+
 - `terraform plan` inside `terraform/` if you need to inspect pending changes.
 - `kubectl get pods -n locust` and `kubectl logs -n locust deployment/locust-master` to verify workloads.
 - `kubectl get hpa -n locust` to monitor autoscaling decisions.
-- If the Ingress LoadBalancer takes a while to provision, check with `kubectl get svc -n ingress-nginx ingress-nginx-controller -w`.
 - View all Ingress routes: `kubectl get ingress -A`
+
+### Ingress LoadBalancer Issues
+
+**LoadBalancer stuck in pending state:**
+```bash
+# Check the ingress controller service status
+kubectl get svc -n ingress-nginx ingress-nginx-controller -w
+
+# Check ingress controller logs
+kubectl logs -n ingress-nginx deployment/ingress-nginx-controller
+
+# Verify AWS Load Balancer is being provisioned
+aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `ingress-nginx`)]'
+```
+
+**Services returning 502/503 errors:**
+```bash
+# Validate all ingress services are healthy
+./observability.sh validate
+
+# Check specific service pods
+kubectl get pods -n monitoring
+kubectl get pods -n locust
+
+# Check ingress configuration
+kubectl describe ingress -n monitoring monitoring-ingress
+kubectl describe ingress -n locust locust-ingress
+
+# Test service endpoints directly (bypassing ingress)
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+# Then visit http://localhost:3000/grafana in browser
+```
+
+**DNS/Network Issues:**
+```bash
+# Get the LoadBalancer URL
+./observability.sh url
+
+# Test connectivity from within cluster
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+  curl -s -o /dev/null -w "%{http_code}" http://prometheus-grafana.monitoring.svc.cluster.local:80
+
+# Check if LoadBalancer is accessible from your location
+curl -v http://$(kubectl get ingress -n monitoring monitoring-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')/grafana/
+```
+
+**Monitoring Service-Specific Issues:**
+```bash
+# Grafana login issues - get admin password:
+kubectl get secret -n monitoring prometheus-grafana-grafana -o jsonpath="{.data.admin-password}" | base64 -d && echo
+
+# Prometheus targets not appearing:
+kubectl logs -n monitoring statefulset/prometheus-prometheus-grafana-kube-pr-prometheus
+
+# AlertManager not reconciling:
+kubectl describe alertmanager -n monitoring prometheus-grafana-kube-pr-alertmanager
+
+# Tempo tracing not working:
+kubectl logs -n monitoring tempo-0 -c tempo
+kubectl logs -n monitoring tempo-0 -c tempo-query
+```
+
+### Port-Forward for Troubleshooting
+
+For internal-only services or when ingress is unavailable:
+```bash
+# Loki logs (internal-only service):
+kubectl port-forward -n monitoring svc/loki-loki 3100:3100
+
+# Direct access to any service for debugging:
+kubectl port-forward -n monitoring svc/prometheus-grafana-kube-pr-prometheus 9090:9090
+```
+
+*Note: Port-forwarding is for troubleshooting only. Normal access is via the Ingress LoadBalancer.*
 
 ## Why the Repo Is Smaller Now
 

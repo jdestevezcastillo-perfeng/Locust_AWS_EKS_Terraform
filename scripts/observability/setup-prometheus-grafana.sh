@@ -18,6 +18,9 @@
 #    ./setup-prometheus-grafana.sh                 # Deploy with defaults    #
 #    ./setup-prometheus-grafana.sh --skip-helm    # Skip helm init          #
 #                                                                              #
+#  Deployment includes 14 phases with automatic ingress validation at the    #
+#  end to ensure all services are accessible via the LoadBalancer.           #
+#                                                                              #
 #  Total Time: ~5-10 minutes                                                  #
 #                                                                              #
 ################################################################################
@@ -1445,54 +1448,103 @@ EOF
     echo ""
 }
 
+# Function to validate ingress services
+validate_ingress_services() {
+    print_section "Validating Ingress Services"
+
+    print_info "Waiting for ingress LoadBalancer to be ready..."
+    local max_wait=120
+    local waited=0
+    local ingress_url=""
+
+    while [[ $waited -lt $max_wait ]]; do
+        ingress_url=$(kubectl get ingress monitoring-ingress -n monitoring \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+        if [[ -n "$ingress_url" ]]; then
+            break
+        fi
+
+        sleep 5
+        waited=$((waited + 5))
+        echo -n "."
+    done
+    echo ""
+
+    if [[ -z "$ingress_url" ]]; then
+        print_warning "Ingress LoadBalancer URL not yet available"
+        print_info "Run './observability.sh validate' later to test service endpoints"
+        echo ""
+        return
+    fi
+
+    print_success "Ingress LoadBalancer ready at: http://${ingress_url}"
+    echo ""
+
+    # Call the standalone validation script
+    local validation_script="${SCRIPT_DIR}/validate-ingress.sh"
+    if [[ -f "$validation_script" ]]; then
+        print_info "Running service endpoint validation..."
+        echo ""
+        bash "$validation_script" || print_warning "Some services may still be initializing. Run './observability.sh validate' to recheck."
+    else
+        print_warning "Validation script not found at: $validation_script"
+        print_info "Skipping automated validation"
+    fi
+    echo ""
+}
+
 # Main execution
 main() {
-    print_info "Phase 1/13: Checking Prerequisites..."
+    print_info "Phase 1/14: Checking Prerequisites..."
     check_helm
     check_kubectl
     echo ""
 
-    print_info "Phase 2/13: Creating Monitoring Namespace..."
+    print_info "Phase 2/14: Creating Monitoring Namespace..."
     create_namespace
 
     if [ "$SKIP_HELM_INIT" = false ]; then
-        print_info "Phase 3/13: Adding Helm Repositories..."
+        print_info "Phase 3/14: Adding Helm Repositories..."
         add_helm_repos
     else
         print_warning "Skipping Helm repository setup..."
         echo ""
     fi
 
-    print_info "Phase 4/13: Deploying AWS Cluster Autoscaler..."
+    print_info "Phase 4/14: Deploying AWS Cluster Autoscaler..."
     deploy_cluster_autoscaler
 
-    print_info "Phase 5/13: Deploying nginx Ingress Controller..."
+    print_info "Phase 5/14: Deploying nginx Ingress Controller..."
     deploy_nginx_ingress
 
-    print_info "Phase 6/13: Deploying VictoriaMetrics..."
+    print_info "Phase 6/14: Deploying VictoriaMetrics..."
     deploy_victoriametrics
 
-    print_info "Phase 7/13: Deploying Prometheus and Grafana..."
+    print_info "Phase 7/14: Deploying Prometheus and Grafana..."
     deploy_prometheus
 
-    print_info "Phase 8/13: Deploying Loki..."
+    print_info "Phase 8/14: Deploying Loki..."
     deploy_loki
 
-    print_info "Phase 9/13: Deploying Tempo..."
+    print_info "Phase 9/14: Deploying Tempo..."
     deploy_tempo
 
-    print_info "Phase 10/13: Deploying Ingress Routes..."
+    print_info "Phase 10/14: Deploying Ingress Routes..."
     deploy_ingress
     deploy_locust_ingress
 
-    print_info "Phase 11/13: Registering Locust metrics..."
+    print_info "Phase 11/14: Registering Locust metrics..."
     apply_locust_servicemonitor
 
-    print_info "Phase 12/13: Deploying Locust Dashboards..."
+    print_info "Phase 12/14: Deploying Locust Dashboards..."
     deploy_locust_dashboards
 
-    print_info "Phase 13/13: Saving Configuration..."
+    print_info "Phase 13/14: Saving Configuration..."
     save_configuration
+
+    print_info "Phase 14/14: Validating Ingress Services..."
+    validate_ingress_services
 
     # Calculate total time
     END_TIME=$(date +%s)

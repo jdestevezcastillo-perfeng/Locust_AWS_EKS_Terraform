@@ -185,5 +185,6 @@ For AWS-specific issues:
 - [EKS User Guide](https://docs.aws.amazon.com/eks/)
 
 For deployment issues:
-- See [QUICKSTART.md](docs/QUICKSTART.md)
-- See [SRE_DEPLOYMENT_GUIDE.md](docs/SRE_DEPLOYMENT_GUIDE.md#troubleshooting-guide)
+- See [README.md](README.md) for architecture and deployment overview
+- Run `./observability.sh url` to get access URLs after deployment
+- See the Troubleshooting section in [README.md](README.md#troubleshooting)
