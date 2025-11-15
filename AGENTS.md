@@ -8,7 +8,7 @@ Core infrastructure lives in `terraform/` (VPC, EKS, ECR) and is parameterized v
 - `./destroy.sh [environment]`: removes Kubernetes resources, deletes the push image, and runs `terraform destroy` for the selected environment.
 - `terraform -chdir=terraform plan|apply`: run targeted infrastructure changes when you need manual control outside the deployment wrapper.
 - `poetry install && poetry run locust -f tests/locustfile.py --headless -u 10 -r 1 --run-time 1m`: execute lightweight scenario validation locally before packaging.
-- `./observability.sh setup|cleanup|url|validate`: bootstrap or maintain the optional Prometheus/Grafana stack in `monitoring`; use `url` to get ingress access URLs and `validate` to test all service endpoints.
+- `./observability.sh setup|cleanup|url|validate`: bootstrap or maintain the optional Prometheus/Grafana stack in `monitoring`; use `url` to get ingress access URLs and `validate` to run HTTP/content checks for every ingress endpoint.
 
 ## Coding Style & Naming Conventions
 Python modules target 3.10, keep functions/classes snake_case/PascalCase, and follow PEP 8 line-lengths (88 chars max); prefer dependency declarations in `pyproject.toml`. Bash scripts in `scripts/` stay POSIX-compatible, uppercase for exported variables, and include `set -euo pipefail`. Terraform keeps one logical resource per file and uses `locals` for shared CIDRs; name resources `veeam-<component>-<env>` to match AWS tagging expectations.

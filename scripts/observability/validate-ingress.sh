@@ -20,7 +20,7 @@
 #   2 - Ingress LoadBalancer not found or not ready
 ################################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # Source common utilities if available
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +28,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ -f "${PROJECT_ROOT}/scripts/common.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/common.sh"
+    set +e
 else
     # Fallback color definitions if common.sh not available
     RED='\033[0;31m'
@@ -46,6 +47,7 @@ fi
 NAMESPACE="monitoring"
 DETAILED=false
 TIMEOUT=10
+CONTENT_MIN_BYTES=200
 VALIDATION_FAILURES=0
 
 # Parse command line arguments
@@ -101,6 +103,8 @@ get_ingress_url() {
 #   $2 - Full URL to test
 #   $3 - Expected HTTP status codes (comma-separated, e.g., "200,302")
 #   $4 - Is optional (true/false, default: false)
+#   $5 - Expected response text (case-insensitive, optional)
+#   $6 - Minimum response size in bytes (defaults to CONTENT_MIN_BYTES)
 # Returns: 0 if successful, 1 if failed
 ################################################################################
 test_service_endpoint() {
@@ -108,19 +112,17 @@ test_service_endpoint() {
     local url="$2"
     local expected_codes="$3"
     local is_optional="${4:-false}"
+    local expected_text="${5:-}"
+    local min_bytes="${6:-$CONTENT_MIN_BYTES}"
 
     local http_code
     local status_symbol
     local status_color
+    local tmp_file
+    tmp_file="$(mktemp)"
 
-    # Make HTTP request with timeout
-    if ${DETAILED}; then
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time ${TIMEOUT} --connect-timeout 5 "${url}" 2>&1) || http_code="000"
-    else
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time ${TIMEOUT} --connect-timeout 5 "${url}" 2>/dev/null) || http_code="000"
-    fi
+    http_code=$(curl -sSL -o "${tmp_file}" -w "%{http_code}" --max-time ${TIMEOUT} --connect-timeout 5 "${url}" 2>/dev/null) || http_code="000"
 
-    # Check if the HTTP code matches any expected codes
     local code_matched=false
     IFS=',' read -ra CODES <<< "${expected_codes}"
     for expected_code in "${CODES[@]}"; do
@@ -130,24 +132,65 @@ test_service_endpoint() {
         fi
     done
 
-    # Determine status
-    if ${code_matched}; then
+    local content_ok=true
+    local content_reason=""
+    local body_size
+    body_size=$(wc -c < "${tmp_file}" 2>/dev/null || echo "0")
+
+    if [[ -n "${expected_text}" ]]; then
+        if ! grep -qi "${expected_text}" "${tmp_file}"; then
+            content_ok=false
+            content_reason="Missing text '${expected_text}'"
+        fi
+    elif [[ "${body_size}" -lt "${min_bytes}" ]]; then
+        content_ok=false
+        content_reason="Body too small (${body_size} bytes, expected >= ${min_bytes})"
+    fi
+
+    local preview=""
+    local optional_warning=false
+    if ${DETAILED}; then
+        preview=$(head -n 5 "${tmp_file}")
+    fi
+
+    rm -f "${tmp_file}"
+
+    if ${code_matched} && ${content_ok}; then
         status_symbol="✓"
         status_color="${GREEN}"
-        printf "${status_color}${status_symbol} %-20s${NC} %s (HTTP %s)\n" "${service_name}:" "${url}" "${http_code}"
+        printf "${status_color}${status_symbol} %-20s${NC} %s (HTTP %s, %s bytes)\n" "${service_name}:" "${url}" "${http_code}" "${body_size}"
+        if ${DETAILED} && [[ -n "${preview}" ]]; then
+            printf "    Preview: %s\n" "${preview}"
+        fi
         return 0
-    elif [[ "${is_optional}" == "true" ]]; then
+    fi
+
+    if [[ "${is_optional}" == "true" ]]; then
+        optional_warning=true
         status_symbol="⚠"
         status_color="${YELLOW}"
-        printf "${status_color}${status_symbol} %-20s${NC} %s (HTTP %s) - Optional service\n" "${service_name}:" "${url}" "${http_code}"
-        return 0
     else
         status_symbol="✗"
         status_color="${RED}"
-        printf "${status_color}${status_symbol} %-20s${NC} %s (HTTP %s) - Expected: %s\n" "${service_name}:" "${url}" "${http_code}" "${expected_codes}"
+    fi
+
+    if ! ${code_matched}; then
+        printf "${status_color}${status_symbol} %-20s${NC} %s (HTTP %s) - Expected codes: %s\n" \
+            "${service_name}:" "${url}" "${http_code}" "${expected_codes}"
+    elif ! ${content_ok}; then
+        printf "${status_color}${status_symbol} %-20s${NC} %s - %s\n" \
+            "${service_name}:" "${url}" "${content_reason}"
+        if ${DETAILED} && [[ -n "${preview}" ]]; then
+            printf "    Preview: %s\n" "${preview}"
+        fi
+    fi
+
+    if ! ${optional_warning}; then
         VALIDATION_FAILURES=$((VALIDATION_FAILURES + 1))
         return 1
     fi
+
+    return 0
 }
 
 ################################################################################
@@ -181,14 +224,14 @@ print_info "Testing service endpoints..."
 echo ""
 
 # Monitoring Services
-test_service_endpoint "Grafana" "http://${INGRESS_URL}/grafana/" "200,302"
-test_service_endpoint "Prometheus" "http://${INGRESS_URL}/prometheus/" "200,302"
-test_service_endpoint "VictoriaMetrics" "http://${INGRESS_URL}/victoria/" "200"
-test_service_endpoint "AlertManager" "http://${INGRESS_URL}/alertmanager/" "200,302"
-test_service_endpoint "Tempo" "http://${INGRESS_URL}/tempo/" "200,302,502" "true"  # Tempo is optional/backend
+test_service_endpoint "Grafana" "http://${INGRESS_URL}/grafana/login" "200,302" "false" "Grafana"
+test_service_endpoint "Prometheus" "http://${INGRESS_URL}/prometheus/graph" "200,302" "false" "Prometheus"
+test_service_endpoint "VictoriaMetrics" "http://${INGRESS_URL}/victoria/" "200,302" "false" "Victoria"
+test_service_endpoint "AlertManager" "http://${INGRESS_URL}/alertmanager/" "200,302" "false" "Alertmanager"
+test_service_endpoint "Tempo" "http://${INGRESS_URL}/tempo/" "200,302,502" "true" "Jaeger"
 
 # Locust Service
-test_service_endpoint "Locust" "http://${INGRESS_URL}/locust/" "200"
+test_service_endpoint "Locust" "http://${INGRESS_URL}/locust/" "200,302" "false" "Locust"
 
 echo ""
 echo "======================================================"
@@ -204,6 +247,7 @@ if [[ ${VALIDATION_FAILURES} -eq 0 ]]; then
     echo "  • AlertManager:   http://${INGRESS_URL}/alertmanager/"
     echo "  • Locust:         http://${INGRESS_URL}/locust/"
     echo ""
+    print_info "Need even more detail? Run './observability.sh validate --detailed' for response previews."
     exit 0
 else
     print_error "Validation failed for ${VALIDATION_FAILURES} service(s)!"
@@ -214,6 +258,8 @@ else
     echo "  3. View ingress routes: kubectl get ingress -A"
     echo "  4. Check ingress logs: kubectl logs -n ingress-nginx deployment/ingress-nginx-controller"
     echo "  5. Describe failing services: kubectl describe ingress -n monitoring"
+    echo ""
+    echo "  Re-run './observability.sh validate --detailed' to inspect bodies and HTTP codes."
     echo ""
     echo "  For detailed troubleshooting, see README.md#troubleshooting"
     echo ""

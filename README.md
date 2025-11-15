@@ -73,6 +73,9 @@ Run `./observability.sh setup` after the core deployment to install the full sta
 ```bash
 # Get the LoadBalancer URL and access instructions
 ./observability.sh url
+
+# Validate all ingress endpoints (HTTP + UI content checks)
+./observability.sh validate --detailed
 ```
 
 Access endpoints at `http://<LOADBALANCER-URL>/<path>`:
@@ -136,8 +139,8 @@ aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerN
 
 **Services returning 502/503 errors:**
 ```bash
-# Validate all ingress services are healthy
-./observability.sh validate
+# Validate all ingress services are healthy and return real UI content
+./observability.sh validate --detailed
 
 # Check specific service pods
 kubectl get pods -n monitoring
@@ -171,10 +174,10 @@ curl -v http://$(kubectl get ingress -n monitoring monitoring-ingress -o jsonpat
 kubectl get secret -n monitoring prometheus-grafana-grafana -o jsonpath="{.data.admin-password}" | base64 -d && echo
 
 # Prometheus targets not appearing:
-kubectl logs -n monitoring statefulset/prometheus-prometheus-grafana-kube-pr-prometheus
+kubectl logs -n monitoring statefulset/prometheus-prometheus-grafana-kube-prometheus-prometheus
 
 # AlertManager not reconciling:
-kubectl describe alertmanager -n monitoring prometheus-grafana-kube-pr-alertmanager
+kubectl describe alertmanager -n monitoring prometheus-grafana-kube-prometheus-alertmanager
 
 # Tempo tracing not working:
 kubectl logs -n monitoring tempo-0 -c tempo
@@ -189,7 +192,7 @@ For internal-only services or when ingress is unavailable:
 kubectl port-forward -n monitoring svc/loki-loki 3100:3100
 
 # Direct access to any service for debugging:
-kubectl port-forward -n monitoring svc/prometheus-grafana-kube-pr-prometheus 9090:9090
+kubectl port-forward -n monitoring svc/prometheus-grafana-kube-prometheus-prometheus 9090:9090
 ```
 
 *Note: Port-forwarding is for troubleshooting only. Normal access is via the Ingress LoadBalancer.*
