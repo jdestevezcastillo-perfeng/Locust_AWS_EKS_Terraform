@@ -12,7 +12,7 @@ Production-grade yet compact toolkit for running distributed [Locust](https://lo
 ## Quick Start
 
 1. **Install prerequisites**
-   - `terraform` ≥ 1.0, `aws-cli` ≥ 2, `kubectl` ≥ 1.28, `docker`, and `jq`
+   - `terraform` ≥ 1.13, `aws-cli` ≥ 2.31, `kubectl` ≥ 1.34, `docker` ≥ 29, and `jq` ≥ 1.8
    - Configure AWS credentials: `aws configure`
 
 2. **Choose an environment**
@@ -27,7 +27,7 @@ Production-grade yet compact toolkit for running distributed [Locust](https://lo
    ./deploy.sh staging v1.2.0
    ```
 
-   The script guides you through region selection, API CIDR restrictions, Terraform apply, Docker build/push, and Kubernetes rollout. On success it prints the LoadBalancer URL for the Locust UI (port 8089).
+   The script guides you through region selection, API CIDR restrictions, Terraform apply, Docker build/push, and Kubernetes rollout. After deployment, use `./observability.sh url` to get access URLs for all services via the Ingress LoadBalancer.
 
 4. **Destroy**
 
@@ -66,14 +66,58 @@ sed "s|__LOCUST_IMAGE__|$IMAGE|g" kubernetes/locust-stack.yaml | kubectl apply -
 
 ## Observability (Optional)
 
-Run `./observability.sh setup` after the core deployment to install the kube-prometheus stack in the `monitoring` namespace. The script checks Helm availability, deploys Prometheus + Grafana, and (optionally) applies a Locust ServiceMonitor if you drop one at `kubernetes/locust-servicemonitor.yaml`. Use `./observability.sh port-forward` for quick local access.
+Run `./observability.sh setup` after the core deployment to install the full stack (Prometheus + Grafana, VictoriaMetrics for long-term metrics, Loki+Promtail for logs, and Tempo for traces) in the `monitoring` namespace. The script validates Helm/kubectl, wires Prometheus remote-write to VictoriaMetrics, provisions Grafana datasources for every backend, and (optionally) applies a Locust `ServiceMonitor` when `kubernetes/locust-servicemonitor.yaml` is present.
+
+**All services are accessible via a single nginx Ingress LoadBalancer** (saving ~$90/month vs separate LoadBalancers):
+
+```bash
+# Get the LoadBalancer URL and access instructions
+./observability.sh url
+```
+
+Access endpoints at `http://<LOADBALANCER-URL>/<path>`:
+- `/grafana` → Grafana Dashboard UI (admin/admin123 by default)
+- `/prometheus` → Prometheus query UI and targets
+- `/victoria` → VictoriaMetrics long-term storage
+- `/alertmanager` → AlertManager UI
+- `/tempo` → Tempo distributed tracing UI (Jaeger)
+- `/locust` → Locust load testing UI and metrics
+
+**Internal-only services** (accessible via Grafana datasources or port-forward):
+- Loki logs: `kubectl port-forward -n monitoring svc/loki-loki 3100:3100`
+
+Clusters with no default StorageClass now fall back to `gp3` automatically (if present). If your
+cluster uses a custom class name, export `VICTORIA_STORAGE_CLASS=<storage-class-name>` before running
+`./observability.sh setup` so the VictoriaMetrics PVC can bind immediately and Helm does not time out
+waiting for volumes.
+
+### Optional Security Features
+
+The Ingress configuration includes commented-out security options that you can enable:
+
+**Basic Authentication:**
+```bash
+# Create htpasswd file (requires apache2-utils)
+htpasswd -c auth your-username
+
+# Create secrets in both namespaces
+kubectl create secret generic basic-auth --from-file=auth -n monitoring
+kubectl create secret generic basic-auth --from-file=auth -n locust
+
+# Uncomment the auth annotations in scripts/observability/setup-prometheus-grafana.sh
+# Then rerun: ./observability.sh setup
+```
+
+**IP Whitelisting:**
+Edit `scripts/observability/setup-prometheus-grafana.sh` and uncomment the `whitelist-source-range` annotation, setting it to your allowed CIDR blocks (e.g., `"1.2.3.4/32,10.0.0.0/8"`). Alternatively, restrict access via AWS security groups on the LoadBalancer.
 
 ## Troubleshooting Essentials
 
 - `terraform plan` inside `terraform/` if you need to inspect pending changes.
 - `kubectl get pods -n locust` and `kubectl logs -n locust deployment/locust-master` to verify workloads.
 - `kubectl get hpa -n locust` to monitor autoscaling decisions.
-- If the LoadBalancer hostname takes a while, rerun `kubectl get svc locust-master -n locust -w`.
+- If the Ingress LoadBalancer takes a while to provision, check with `kubectl get svc -n ingress-nginx ingress-nginx-controller -w`.
+- View all Ingress routes: `kubectl get ingress -A`
 
 ## Why the Repo Is Smaller Now
 

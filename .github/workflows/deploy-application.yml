@@ -487,14 +487,29 @@ jobs:
           ## Access Information
           EOF
 
-          if [ -n "${{ steps.get-loadbalancer.outputs.loadbalancer-url }}" ]; then
+          # Get Ingress LoadBalancer URL
+          INGRESS_LB=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || \
+            kubectl get svc -n ingress-nginx ingress-nginx-controller \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+
+          if [ -n "$INGRESS_LB" ]; then
             cat >> deployment-summary.md <<EOF
 
-          - Locust Web UI: http://${{ steps.get-loadbalancer.outputs.loadbalancer-url }}:8089
+          ### 🔗 Ingress LoadBalancer Access
+
+          - Locust Web UI: http://$INGRESS_LB/locust
+          - Prometheus: http://$INGRESS_LB/prometheus
+          - Grafana: http://$INGRESS_LB/grafana
+
+          All services accessible via single LoadBalancer (saves ~\$90/month)
 
           ## Quick Commands
 
           \`\`\`bash
+          # Get all access URLs
+          ./observability.sh url
+
           # View master logs
           kubectl logs -f deployment/locust-master -n locust
 
@@ -507,24 +522,22 @@ jobs:
           # Check HPA status
           kubectl get hpa -n locust
 
-          # Access Locust UI (if LoadBalancer not ready)
-          kubectl port-forward -n locust svc/locust-master 8089:8089
-          # Then open: http://localhost:8089
+          # View Ingress routes
+          kubectl get ingress -A
           \`\`\`
           EOF
           else
             cat >> deployment-summary.md <<EOF
 
-          - LoadBalancer URL: Provisioning in progress
-          - Check status: \`kubectl get svc locust-master -n locust\`
+          - Ingress LoadBalancer: Provisioning in progress
+          - Check status: \`kubectl get svc -n ingress-nginx ingress-nginx-controller -w\`
 
-          ## Access via Port Forward
+          ## Get Access URLs
 
-          While LoadBalancer provisions, use port-forward:
+          Once provisioned, get URLs with:
 
           \`\`\`bash
-          kubectl port-forward -n locust svc/locust-master 8089:8089
-          # Then open: http://localhost:8089
+          ./observability.sh url
           \`\`\`
           EOF
           fi

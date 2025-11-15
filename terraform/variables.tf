@@ -49,7 +49,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version for EKS cluster"
   type        = string
-  default     = "1.28"
+  default     = "1.34"
 }
 
 variable "cluster_endpoint_public_access" {
@@ -68,20 +68,89 @@ variable "cluster_endpoint_public_access_cidrs" {
 # EKS Node Group Variables
 ################################################################################
 
-variable "node_group_name" {
-  description = "Name of the EKS node group"
+# Locust Master Node Group
+variable "locust_master_node_group_name" {
+  description = "Name of the EKS Locust master node group"
   type        = string
-  default     = "locust-nodes"
+  default     = "locust-master-nodes"
+}
+
+variable "locust_master_instance_type" {
+  description = "EC2 instance type for Locust master node"
+  type        = string
+  default     = "t3.micro"
+
+  validation {
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.locust_master_instance_type))
+    error_message = "Master instance type must be a valid t3, c7i-flex, or m7i-flex instance."
+  }
+}
+
+variable "locust_master_capacity_type" {
+  description = "Type of capacity for Locust master node. Valid values: ON_DEMAND, SPOT"
+  type        = string
+  default     = "SPOT"
+
+  validation {
+    condition     = contains(["ON_DEMAND", "SPOT"], var.locust_master_capacity_type)
+    error_message = "Master capacity type must be either ON_DEMAND or SPOT."
+  }
+}
+
+variable "locust_master_disk_size" {
+  description = "Disk size in GB for Locust master node"
+  type        = number
+  default     = 20
+}
+
+variable "locust_master_desired_capacity" {
+  description = "Desired number of Locust master nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.locust_master_desired_capacity >= 1 && var.locust_master_desired_capacity <= 2
+    error_message = "Master desired capacity must be 1 or 2."
+  }
+}
+
+variable "locust_master_min_capacity" {
+  description = "Minimum number of Locust master nodes"
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.locust_master_min_capacity >= 1 && var.locust_master_min_capacity <= 2
+    error_message = "Master min capacity must be 1 or 2."
+  }
+}
+
+variable "locust_master_max_capacity" {
+  description = "Maximum number of Locust master nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.locust_master_max_capacity >= 1 && var.locust_master_max_capacity <= 2
+    error_message = "Master max capacity must be 1 or 2 (for HA failover only)."
+  }
+}
+
+# Locust Worker Node Group
+variable "node_group_name" {
+  description = "Name of the EKS Locust worker node group"
+  type        = string
+  default     = "locust-worker-nodes"
 }
 
 variable "node_instance_type" {
-  description = "EC2 instance type for worker nodes"
+  description = "EC2 instance type for Locust worker nodes"
   type        = string
   default     = "t3.medium"
 
   validation {
-    condition     = can(regex("^t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)$", var.node_instance_type))
-    error_message = "Node instance type must be a valid t3 instance (t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge)."
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.node_instance_type))
+    error_message = "Worker instance type must be a valid t3, c7i-flex, or m7i-flex instance."
   }
 }
 
@@ -132,6 +201,77 @@ variable "max_capacity" {
   validation {
     condition     = var.max_capacity >= 1 && var.max_capacity <= 100
     error_message = "Maximum capacity must be between 1 and 100."
+  }
+}
+
+################################################################################
+# EKS Monitoring Node Group Variables
+################################################################################
+
+variable "monitoring_node_group_name" {
+  description = "Name of the EKS monitoring node group"
+  type        = string
+  default     = "monitoring-nodes"
+}
+
+variable "monitoring_instance_type" {
+  description = "EC2 instance type for monitoring nodes (VictoriaMetrics, Prometheus, Loki, Tempo)"
+  type        = string
+  default     = "m7i-flex.large"
+
+  validation {
+    condition     = can(regex("^(t3\\.(nano|micro|small|medium|large|xlarge|2xlarge)|c7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge)|m7i-flex\\.(large|xlarge|2xlarge|4xlarge|8xlarge))$", var.monitoring_instance_type))
+    error_message = "Monitoring instance type must be a valid t3, c7i-flex, or m7i-flex instance."
+  }
+}
+
+variable "monitoring_capacity_type" {
+  description = "Type of capacity for monitoring nodes. Valid values: ON_DEMAND, SPOT"
+  type        = string
+  default     = "SPOT"
+
+  validation {
+    condition     = contains(["ON_DEMAND", "SPOT"], var.monitoring_capacity_type)
+    error_message = "Monitoring capacity type must be either ON_DEMAND or SPOT."
+  }
+}
+
+variable "monitoring_disk_size" {
+  description = "Disk size in GB for monitoring nodes"
+  type        = number
+  default     = 30
+}
+
+variable "monitoring_desired_capacity" {
+  description = "Desired number of monitoring nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.monitoring_desired_capacity >= 1 && var.monitoring_desired_capacity <= 50
+    error_message = "Monitoring desired capacity must be between 1 and 50."
+  }
+}
+
+variable "monitoring_min_capacity" {
+  description = "Minimum number of monitoring nodes"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.monitoring_min_capacity >= 1 && var.monitoring_min_capacity <= 50
+    error_message = "Monitoring minimum capacity must be between 1 and 50."
+  }
+}
+
+variable "monitoring_max_capacity" {
+  description = "Maximum number of monitoring nodes"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.monitoring_max_capacity >= 1 && var.monitoring_max_capacity <= 50
+    error_message = "Monitoring maximum capacity must be between 1 and 50."
   }
 }
 

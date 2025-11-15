@@ -13,6 +13,7 @@ LOCUST_FILE=${LOCUST_FILE:-locustfile.py}
 MASTER_HOST=${MASTER_HOST:-locust-master}
 MASTER_PORT=${MASTER_PORT:-5557}
 LOG_LEVEL=${LOG_LEVEL:-INFO}
+WEB_BASE_PATH=${WEB_BASE_PATH:-}
 
 echo "=============================================="
 echo "  Locust Load Testing Container"
@@ -29,14 +30,15 @@ if [ "$LOCUST_MODE" = "master" ]; then
     echo "Prometheus metrics will be available on port 8090/metrics"
     echo "Workers should connect to: ${HOSTNAME}:${MASTER_PORT}"
 
-    exec locust \
-        -f ${LOCUST_FILE} \
-        --master \
-        --master-bind-port=${MASTER_PORT} \
-        --host=${TARGET_HOST} \
-        --web-host=0.0.0.0 \
-        --web-port=8089 \
-        --loglevel=${LOG_LEVEL}
+    # Build command with optional web-base-path
+    CMD="locust -f ${LOCUST_FILE} --master --master-bind-port=${MASTER_PORT} --host=${TARGET_HOST} --web-host=0.0.0.0 --web-port=8089 --loglevel=${LOG_LEVEL}"
+
+    if [ -n "$WEB_BASE_PATH" ]; then
+        echo "Web base path: ${WEB_BASE_PATH}"
+        CMD="$CMD --web-base-path=${WEB_BASE_PATH}"
+    fi
+
+    exec $CMD
 
 elif [ "$LOCUST_MODE" = "worker" ]; then
     echo "Starting Locust Worker..."

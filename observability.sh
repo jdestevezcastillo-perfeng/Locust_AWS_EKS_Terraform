@@ -10,11 +10,15 @@
 #                                                                              #
 #  Usage:                                                                      #
 #    ./observability.sh setup              # Deploy Prometheus & Grafana     #
+#    ./observability.sh url                # Get ingress LoadBalancer URL    #
 #    ./observability.sh cleanup            # Remove observability stack      #
 #    ./observability.sh status             # Check observability status      #
 #    ./observability.sh logs               # View pod logs                    #
-#    ./observability.sh port-forward       # Setup port forwarding           #
+#    ./observability.sh port-forward       # Port-forward (troubleshooting)  #
 #    ./observability.sh help               # Show this help message          #
+#                                                                              #
+#  Primary Access: All services accessible via single ingress LoadBalancer.   #
+#  Run './observability.sh url' to get access URLs after setup.              #
 #                                                                              #
 ################################################################################
 
@@ -30,6 +34,11 @@ source "${PROJECT_ROOT}/scripts/common.sh"
 NAMESPACE_MONITORING="monitoring"
 OBSERVABILITY_DIR="${PROJECT_ROOT}/scripts/observability"
 ACCESS_REPORT_FILE="${PROJECT_ROOT}/reports/observability-access.md"
+PROM_HELM_RELEASE="prometheus-grafana"
+VICTORIA_HELM_RELEASE="victoria-metrics"
+LOKI_HELM_RELEASE="loki"
+TEMPO_HELM_RELEASE="tempo"
+PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-prometheus-prometheus"
 
 # Load observability environment if available
 load_observability_env() {
@@ -44,23 +53,19 @@ load_observability_env() {
 generate_access_report() {
     load_observability_env
 
-    local grafana_namespace="${GRAFANA_NAMESPACE:-$NAMESPACE_MONITORING}"
-    local prometheus_namespace="${PROMETHEUS_NAMESPACE:-$NAMESPACE_MONITORING}"
-    local locust_namespace="${LOCUST_NAMESPACE:-locust}"
     local grafana_password="${GRAFANA_ADMIN_PASSWORD:-admin123}"
 
-    local grafana_port_forward="kubectl port-forward -n ${grafana_namespace} svc/prometheus-grafana 3000:80"
-    local prometheus_port_forward="kubectl port-forward -n ${prometheus_namespace} svc/prometheus-grafana 9090:9090"
+    # Get Ingress LoadBalancer URL
+    local ingress_lb
+    ingress_lb=$(get_loadbalancer_ip "ingress-nginx" "ingress-nginx-controller" || true)
 
-    local locust_host
-    locust_host=$(get_loadbalancer_ip "$locust_namespace" "locust-master" || true)
-    local locust_url locust_note
-    if [ -n "$locust_host" ]; then
-        locust_url="http://${locust_host}:8089"
-        locust_note="Public LoadBalancer for service 'locust-master' in namespace ${locust_namespace}."
+    local base_url ingress_status
+    if [ -n "$ingress_lb" ]; then
+        base_url="http://${ingress_lb}"
+        ingress_status="✅ Active"
     else
-        locust_url="(pending)"
-        locust_note="LoadBalancer not ready yet. Check with 'kubectl get svc -n ${locust_namespace} locust-master'."
+        base_url="(pending)"
+        ingress_status="⏳ LoadBalancer provisioning... Check with \`kubectl get svc -n ingress-nginx ingress-nginx-controller\`"
     fi
 
     local timestamp
@@ -73,11 +78,46 @@ generate_access_report() {
 
 _Last updated: ${timestamp}_
 
+## Ingress LoadBalancer
+
+**Status:** ${ingress_status}
+
+All services are accessible via a single nginx Ingress LoadBalancer (saves ~\$72/month vs separate LoadBalancers).
+
+## Service Endpoints
+
 | Service | URL | Notes |
 | --- | --- | --- |
-| Grafana | http://localhost:3000 | Port-forward: \`${grafana_port_forward}\`. Credentials: admin / ${grafana_password}. |
-| Prometheus | http://localhost:9090 | Port-forward: \`${prometheus_port_forward}\`. Targets view: \`http://localhost:9090/targets\`. |
-| Locust UI | ${locust_url} | ${locust_note} |
+| **Grafana** | ${base_url}/grafana | Dashboard UI. Credentials: \`admin\` / \`${grafana_password}\` |
+| **Prometheus** | ${base_url}/prometheus | Metrics query UI and targets: \`/prometheus/targets\` |
+| **VictoriaMetrics** | ${base_url}/victoria | Long-term metrics storage. Query path: \`/victoria/select/\` |
+| **AlertManager** | ${base_url}/alertmanager | Alert management UI |
+| **Tempo** | ${base_url}/tempo | Distributed tracing UI (Jaeger UI) |
+| **Locust** | ${base_url}/locust | Load testing web UI. Metrics: \`/locust/metrics\` |
+
+## Internal Services
+
+These services are only accessible from within the cluster:
+
+| Service | Type | Access Method |
+| --- | --- | --- |
+| **Loki** | ClusterIP | Query via Grafana datasource \`Loki\` or port-forward: \`kubectl port-forward -n monitoring svc/${LOKI_HELM_RELEASE:-loki}-loki 3100:3100\` |
+
+## Quick Commands
+
+\`\`\`bash
+# Get LoadBalancer URL
+./observability.sh url
+
+# Check Ingress status
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+# View all Ingress rules
+kubectl get ingress -A
+\`\`\`
+
+---
+💰 **Cost Savings:** Using 1 nginx Ingress LoadBalancer instead of 6 separate LoadBalancers saves approximately \$90/month on AWS.
 EOF
 
     print_success "Access instructions saved to ${ACCESS_REPORT_FILE#$PROJECT_ROOT/}"
@@ -107,11 +147,9 @@ Commands:
                         --component    Specify component (prometheus, grafana, etc.)
                         --follow       Follow logs in real-time
 
-  port-forward        Setup port forwarding for accessing services
-                      Options:
-                        --prometheus   Forward only Prometheus (port 9090)
-                        --grafana      Forward only Grafana (port 3000)
-                        --both         Forward both (default)
+  url                 Get Ingress LoadBalancer URL and service endpoints
+                      Aliases: urls, access
+                      Shows all available monitoring and load testing services
 
   help                Show this help message
 
@@ -129,8 +167,8 @@ Examples:
   View Grafana logs:
     ./observability.sh logs --component grafana --follow
 
-  Port forward Grafana:
-    ./observability.sh port-forward --grafana
+  Get access URLs:
+    ./observability.sh url
 
 EOF
 }
@@ -262,52 +300,30 @@ show_logs() {
     fi
 }
 
-# Function to setup port forwarding
-setup_port_forwarding() {
-    local prometheus=true
-    local grafana=true
+# Function to get and display Ingress LoadBalancer URL
+get_ingress_url() {
+    load_observability_env
 
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --prometheus)
-                prometheus=true
-                grafana=false
-                shift
-                ;;
-            --grafana)
-                prometheus=false
-                grafana=true
-                shift
-                ;;
-            --both)
-                prometheus=true
-                grafana=true
-                shift
-                ;;
-            *)
-                shift
-                ;;
-        esac
-    done
+    local ingress_lb
+    ingress_lb=$(get_loadbalancer_ip "ingress-nginx" "ingress-nginx-controller" || true)
 
-    if [ "$prometheus" = true ]; then
-        print_info "Setting up port forwarding for Prometheus..."
-        print_status "kubectl port-forward -n $NAMESPACE_MONITORING svc/prometheus-grafana 9090:9090"
-        print_info "Access: http://localhost:9090"
-        echo ""
+    if [ -z "$ingress_lb" ]; then
+        print_warning "Ingress LoadBalancer not ready yet"
+        print_info "Check status with: kubectl get svc -n ingress-nginx ingress-nginx-controller"
+        return 1
     fi
 
-    if [ "$grafana" = true ]; then
-        print_info "Setting up port forwarding for Grafana..."
-        print_status "kubectl port-forward -n $NAMESPACE_MONITORING svc/prometheus-grafana 3000:80"
-        print_info "Access: http://localhost:3000"
-        print_info "Default credentials: admin / admin123"
-        echo ""
-    fi
-
-    if [ "$prometheus" = true ] && [ "$grafana" = true ]; then
-        print_warning "Run these commands in separate terminals"
-    fi
+    print_success "Ingress LoadBalancer URL: http://${ingress_lb}"
+    echo ""
+    print_info "Available services:"
+    echo "  • Grafana:        http://${ingress_lb}/grafana"
+    echo "  • Prometheus:     http://${ingress_lb}/prometheus"
+    echo "  • VictoriaMetrics: http://${ingress_lb}/victoria"
+    echo "  • AlertManager:   http://${ingress_lb}/alertmanager"
+    echo "  • Tempo:          http://${ingress_lb}/tempo"
+    echo "  • Locust:         http://${ingress_lb}/locust"
+    echo ""
+    print_info "Grafana default credentials: admin / ${GRAFANA_ADMIN_PASSWORD:-admin123}"
 }
 
 # Main execution
@@ -330,9 +346,8 @@ main() {
             shift
             show_logs "$@"
             ;;
-        port-forward)
-            shift
-            setup_port_forwarding "$@"
+        url|urls|access)
+            get_ingress_url
             ;;
         help)
             show_help
