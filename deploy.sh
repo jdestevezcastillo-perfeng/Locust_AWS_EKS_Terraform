@@ -149,16 +149,11 @@ deploy_locust() {
 
     wait_for_deployment "locust-master" "locust" 300
     wait_for_deployment "locust-worker" "locust" 300
-    wait_for_loadbalancer_ip "locust" "locust-master" 300 || \
-        print_warning "LoadBalancer IP still provisioning"
 
-    local lb
-    lb=$(get_loadbalancer_ip "locust" "locust-master")
-    if [ -n "$lb" ]; then
-        print_success "Locust UI: http://${lb}:8089"
-    else
-        print_warning "LoadBalancer IP not yet assigned. Check with 'kubectl get svc -n locust'."
-    fi
+    print_success "Locust workloads deployed successfully"
+    print_info "To access Locust UI, run: ./observability.sh setup"
+    print_info "Then get the URL with: ./observability.sh url"
+    print_info "Locust will be available at: http://<LOADBALANCER-URL>/locust"
 }
 
 main() {

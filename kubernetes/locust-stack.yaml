@@ -56,6 +56,8 @@ spec:
           value: "master"
         - name: LOCUST_FILE
           value: "tests/locustfile.py"
+        - name: WEB_BASE_PATH
+          value: "/locust"
         - name: TARGET_HOST
           valueFrom:
             configMapKeyRef:
@@ -89,14 +91,14 @@ spec:
             memory: 1Gi
         livenessProbe:
           httpGet:
-            path: /
+            path: /locust
             port: 8089
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /
+            path: /locust
             port: 8089
           initialDelaySeconds: 10
           periodSeconds: 5

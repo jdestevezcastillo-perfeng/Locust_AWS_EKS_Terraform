@@ -1041,8 +1041,8 @@ metadata:
   name: locust-ingress
   namespace: locust
   annotations:
-    # Strip path prefix before forwarding to backend
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # Keep the /locust prefix when forwarding to backend (no rewriting)
+    # This ensures static assets load correctly
     # Set larger timeouts for load testing
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
@@ -1065,8 +1065,9 @@ spec:
   - http:
       paths:
       # Locust - Load testing web UI and metrics
-      - path: /locust(/|$)(.*)
-        pathType: ImplementationSpecific
+      # Using Prefix path type without rewriting to preserve /locust path
+      - path: /locust
+        pathType: Prefix
         backend:
           service:
             name: locust-master

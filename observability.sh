@@ -10,11 +10,15 @@
 #                                                                              #
 #  Usage:                                                                      #
 #    ./observability.sh setup              # Deploy Prometheus & Grafana     #
+#    ./observability.sh url                # Get ingress LoadBalancer URL    #
 #    ./observability.sh cleanup            # Remove observability stack      #
 #    ./observability.sh status             # Check observability status      #
 #    ./observability.sh logs               # View pod logs                    #
-#    ./observability.sh port-forward       # Setup port forwarding           #
+#    ./observability.sh port-forward       # Port-forward (troubleshooting)  #
 #    ./observability.sh help               # Show this help message          #
+#                                                                              #
+#  Primary Access: All services accessible via single ingress LoadBalancer.   #
+#  Run './observability.sh url' to get access URLs after setup.              #
 #                                                                              #
 ################################################################################
 
