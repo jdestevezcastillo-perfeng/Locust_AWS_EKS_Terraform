@@ -18,6 +18,9 @@
 #    ./setup-prometheus-grafana.sh                 # Deploy with defaults    #
 #    ./setup-prometheus-grafana.sh --skip-helm    # Skip helm init          #
 #                                                                              #
+#  Deployment includes 14 phases with automatic ingress validation at the    #
+#  end to ensure all services are accessible via the LoadBalancer.           #
+#                                                                              #
 #  Total Time: ~5-10 minutes                                                  #
 #                                                                              #
 ################################################################################
@@ -47,7 +50,18 @@ PROM_HELM_RELEASE="prometheus-grafana"
 VICTORIA_HELM_RELEASE="victoria-metrics"
 LOKI_HELM_RELEASE="loki"
 TEMPO_HELM_RELEASE="tempo"
-PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-prometheus-prometheus"
+PROM_SERVICE_NAME="${PROM_HELM_RELEASE}-kube-pr-prometheus"
+PROM_SERVICE_PORT=9090
+PROM_SERVICE_HOST="${PROM_SERVICE_NAME}.${PROMETHEUS_NAMESPACE}.svc.cluster.local"
+VICTORIA_SERVICE_NAME="${VICTORIA_HELM_RELEASE}-victoria-metrics-single-server"
+VICTORIA_SERVICE_PORT=8428
+VICTORIA_SERVICE_HOST="${VICTORIA_SERVICE_NAME}.${PROMETHEUS_NAMESPACE}.svc.cluster.local"
+LOKI_SERVICE_NAME="loki"
+LOKI_SERVICE_PORT=3100
+LOKI_SERVICE_HOST="${LOKI_SERVICE_NAME}.${PROMETHEUS_NAMESPACE}.svc.cluster.local"
+TEMPO_SERVICE_NAME="tempo"
+TEMPO_SERVICE_PORT=3200
+TEMPO_SERVICE_HOST="${TEMPO_SERVICE_NAME}.${PROMETHEUS_NAMESPACE}.svc.cluster.local"
 
 # VictoriaMetrics resource overrides
 VICTORIA_CPU_REQUEST="${VICTORIA_CPU_REQUEST:-500m}"
@@ -146,14 +160,35 @@ deploy_cluster_autoscaler() {
 
     # Get cluster name from Terraform output
     local cluster_name
+    local cluster_region
+    local cluster_autoscaler_role_arn
     cluster_name=$(get_tf_output "cluster_name")
+    cluster_region=$(get_tf_output "aws_region")
+    cluster_autoscaler_role_arn=$(get_tf_output "cluster_autoscaler_role_arn")
 
     if [ -z "$cluster_name" ]; then
         print_warning "Could not retrieve cluster name from Terraform. Using default from config..."
         cluster_name="${CLUSTER_NAME:-locust-dev-cluster}"
     fi
 
+    if [ -z "$cluster_region" ]; then
+        cluster_region="$(aws configure get region 2>/dev/null || echo "")"
+    fi
+    if [ -z "$cluster_region" ]; then
+        cluster_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+        print_warning "Falling back to cluster region '${cluster_region}' (set aws_region output for accuracy)"
+    fi
+
+    local sa_annotations=""
+    if [ -z "$cluster_autoscaler_role_arn" ]; then
+        print_warning "Could not fetch cluster_autoscaler_role_arn from Terraform outputs. Ensure IRSA role exists."
+    else
+        print_info "Using IRSA role: $cluster_autoscaler_role_arn"
+        sa_annotations=$'  annotations:\n    eks.amazonaws.com/role-arn: '"${cluster_autoscaler_role_arn}"
+    fi
+
     print_info "Deploying Cluster Autoscaler for cluster: $cluster_name"
+    print_info "Autoscaler will operate in AWS region: $cluster_region"
 
     # Create Cluster Autoscaler deployment
     cat > /tmp/cluster-autoscaler.yaml <<EOF
@@ -165,6 +200,9 @@ metadata:
   labels:
     k8s-addon: cluster-autoscaler.addons.k8s.io
     k8s-app: cluster-autoscaler
+${sa_annotations}
+  annotations:
+    eks.amazonaws.com/role-arn: "${cluster_autoscaler_role_arn}"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -298,6 +336,11 @@ spec:
       containers:
         - image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.31.0
           name: cluster-autoscaler
+          env:
+            - name: AWS_REGION
+              value: "${cluster_region}"
+            - name: AWS_DEFAULT_REGION
+              value: "${cluster_region}"
           resources:
             limits:
               cpu: 100m
@@ -582,7 +625,7 @@ prometheus:
             replacement: \$1:\$2
             target_label: __address__
     remoteWrite:
-      - url: "http://$VICTORIA_HELM_RELEASE-victoria-metrics-single-server.$PROMETHEUS_NAMESPACE.svc.cluster.local:8428/api/v1/write"
+      - url: "http://${VICTORIA_SERVICE_HOST}:${VICTORIA_SERVICE_PORT}/api/v1/write"
         writeRelabelConfigs: []
         queueConfig:
           capacity: 50000
@@ -636,12 +679,23 @@ grafana:
   sidecar:
     datasources:
       enabled: true
+      defaultDatasourceEnabled: false
   additionalDataSources:
+    - name: Prometheus
+      uid: prometheus
+      type: prometheus
+      access: proxy
+      url: "http://${PROM_SERVICE_HOST}:${PROM_SERVICE_PORT}"
+      isDefault: true
+      jsonData:
+        httpMethod: POST
+        manageAlerts: true
+        timeInterval: 30s
     - name: VictoriaMetrics
       uid: victoria-metrics
       type: prometheus
       access: proxy
-      url: "http://$VICTORIA_HELM_RELEASE-victoria-metrics-single-server.$PROMETHEUS_NAMESPACE.svc.cluster.local:8428"
+      url: "http://${VICTORIA_SERVICE_HOST}:${VICTORIA_SERVICE_PORT}"
       isDefault: false
       jsonData:
         timeInterval: 30s
@@ -649,13 +703,13 @@ grafana:
       uid: loki
       type: loki
       access: proxy
-      url: "http://$LOKI_HELM_RELEASE-loki.$PROMETHEUS_NAMESPACE.svc.cluster.local:3100"
+      url: "http://${LOKI_SERVICE_HOST}:${LOKI_SERVICE_PORT}"
       isDefault: false
     - name: Tempo
       uid: tempo
       type: tempo
       access: proxy
-      url: "http://$TEMPO_HELM_RELEASE-tempo.$PROMETHEUS_NAMESPACE.svc.cluster.local:3200"
+      url: "http://${TEMPO_SERVICE_HOST}:${TEMPO_SERVICE_PORT}"
       jsonData:
         httpMethod: GET
         tracesToLogs:
@@ -709,14 +763,12 @@ alertmanager:
         value: monitoring
         effect: NoSchedule
   config:
-    global:
-      resolve_timeout: 5m
     route:
+      receiver: 'default'
       group_by: ['alertname', 'cluster', 'service']
       group_wait: 10s
       group_interval: 10s
       repeat_interval: 12h
-      receiver: 'default'
     receivers:
       - name: 'default'
 
@@ -873,6 +925,9 @@ prometheus:
   enabled: false
 grafana:
   enabled: false
+  sidecar:
+    datasources:
+      enabled: false
 fluent-bit:
   enabled: false
 promtail:
@@ -943,7 +998,7 @@ deploy_ingress() {
     print_section "Deploying Ingress for Monitoring Tools"
 
     # Create Ingress resource
-    cat > /tmp/monitoring-ingress.yaml <<'EOF'
+    cat > /tmp/monitoring-ingress.yaml <<EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -951,7 +1006,8 @@ metadata:
   namespace: monitoring
   annotations:
     # Strip path prefix before forwarding to backend
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/rewrite-target: /\$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
     # Set larger timeouts for long-running queries
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
@@ -978,7 +1034,7 @@ spec:
         pathType: ImplementationSpecific
         backend:
           service:
-            name: prometheus-grafana-grafana
+            name: prometheus-grafana
             port:
               number: 80
       # Prometheus - Metrics query UI
@@ -988,15 +1044,15 @@ spec:
           service:
             name: prometheus-grafana-kube-pr-prometheus
             port:
-              number: 9090
+              number: ${PROM_SERVICE_PORT}
       # VictoriaMetrics - Long-term metrics storage UI
       - path: /victoria(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
           service:
-            name: victoria-metrics-victoria-metrics-single-server
+            name: ${VICTORIA_SERVICE_NAME}
             port:
-              number: 8428
+              number: ${VICTORIA_SERVICE_PORT}
       # AlertManager - Alert management UI
       - path: /alertmanager(/|$)(.*)
         pathType: ImplementationSpecific
@@ -1005,14 +1061,14 @@ spec:
             name: prometheus-grafana-kube-pr-alertmanager
             port:
               number: 9093
-      # Tempo - Distributed tracing UI
+      # Tempo - Distributed tracing UI (main Tempo port 3200)
       - path: /tempo(/|$)(.*)
         pathType: ImplementationSpecific
         backend:
           service:
-            name: tempo-tempo-query
+            name: tempo
             port:
-              number: 16686
+              number: 3200
 EOF
 
     # Apply Ingress resource
@@ -1445,54 +1501,103 @@ EOF
     echo ""
 }
 
+# Function to validate ingress services
+validate_ingress_services() {
+    print_section "Validating Ingress Services"
+
+    print_info "Waiting for ingress LoadBalancer to be ready..."
+    local max_wait=120
+    local waited=0
+    local ingress_url=""
+
+    while [[ $waited -lt $max_wait ]]; do
+        ingress_url=$(kubectl get ingress monitoring-ingress -n monitoring \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+        if [[ -n "$ingress_url" ]]; then
+            break
+        fi
+
+        sleep 5
+        waited=$((waited + 5))
+        echo -n "."
+    done
+    echo ""
+
+    if [[ -z "$ingress_url" ]]; then
+        print_warning "Ingress LoadBalancer URL not yet available"
+        print_info "Run './observability.sh validate' later to test service endpoints"
+        echo ""
+        return
+    fi
+
+    print_success "Ingress LoadBalancer ready at: http://${ingress_url}"
+    echo ""
+
+    # Call the standalone validation script
+    local validation_script="${SCRIPT_DIR}/validate-ingress.sh"
+    if [[ -f "$validation_script" ]]; then
+        print_info "Running service endpoint validation..."
+        echo ""
+        bash "$validation_script" || print_warning "Some services may still be initializing. Run './observability.sh validate' to recheck."
+    else
+        print_warning "Validation script not found at: $validation_script"
+        print_info "Skipping automated validation"
+    fi
+    echo ""
+}
+
 # Main execution
 main() {
-    print_info "Phase 1/13: Checking Prerequisites..."
+    print_info "Phase 1/14: Checking Prerequisites..."
     check_helm
     check_kubectl
     echo ""
 
-    print_info "Phase 2/13: Creating Monitoring Namespace..."
+    print_info "Phase 2/14: Creating Monitoring Namespace..."
     create_namespace
 
     if [ "$SKIP_HELM_INIT" = false ]; then
-        print_info "Phase 3/13: Adding Helm Repositories..."
+        print_info "Phase 3/14: Adding Helm Repositories..."
         add_helm_repos
     else
         print_warning "Skipping Helm repository setup..."
         echo ""
     fi
 
-    print_info "Phase 4/13: Deploying AWS Cluster Autoscaler..."
+    print_info "Phase 4/14: Deploying AWS Cluster Autoscaler..."
     deploy_cluster_autoscaler
 
-    print_info "Phase 5/13: Deploying nginx Ingress Controller..."
+    print_info "Phase 5/14: Deploying nginx Ingress Controller..."
     deploy_nginx_ingress
 
-    print_info "Phase 6/13: Deploying VictoriaMetrics..."
+    print_info "Phase 6/14: Deploying VictoriaMetrics..."
     deploy_victoriametrics
 
-    print_info "Phase 7/13: Deploying Prometheus and Grafana..."
+    print_info "Phase 7/14: Deploying Prometheus and Grafana..."
     deploy_prometheus
 
-    print_info "Phase 8/13: Deploying Loki..."
+    print_info "Phase 8/14: Deploying Loki..."
     deploy_loki
 
-    print_info "Phase 9/13: Deploying Tempo..."
+    print_info "Phase 9/14: Deploying Tempo..."
     deploy_tempo
 
-    print_info "Phase 10/13: Deploying Ingress Routes..."
+    print_info "Phase 10/14: Deploying Ingress Routes..."
     deploy_ingress
     deploy_locust_ingress
 
-    print_info "Phase 11/13: Registering Locust metrics..."
+    print_info "Phase 11/14: Registering Locust metrics..."
     apply_locust_servicemonitor
 
-    print_info "Phase 12/13: Deploying Locust Dashboards..."
+    print_info "Phase 12/14: Deploying Locust Dashboards..."
     deploy_locust_dashboards
 
-    print_info "Phase 13/13: Saving Configuration..."
+    print_info "Phase 13/14: Saving Configuration..."
     save_configuration
+
+    print_info "Phase 14/14: Validating Ingress Services..."
+    validate_ingress_services
 
     # Calculate total time
     END_TIME=$(date +%s)

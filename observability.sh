@@ -14,6 +14,7 @@
 #    ./observability.sh cleanup            # Remove observability stack      #
 #    ./observability.sh status             # Check observability status      #
 #    ./observability.sh logs               # View pod logs                    #
+#    ./observability.sh validate           # Validate ingress endpoints      #
 #    ./observability.sh port-forward       # Port-forward (troubleshooting)  #
 #    ./observability.sh help               # Show this help message          #
 #                                                                              #
@@ -112,6 +113,9 @@ These services are only accessible from within the cluster:
 # Check Ingress status
 kubectl get svc -n ingress-nginx ingress-nginx-controller
 
+# Validate ingress endpoints (HTTP status + UI content)
+./observability.sh validate --detailed
+
 # View all Ingress rules
 kubectl get ingress -A
 \`\`\`
@@ -151,6 +155,11 @@ Commands:
                       Aliases: urls, access
                       Shows all available monitoring and load testing services
 
+  validate            Validate ingress endpoints return healthy HTTP codes and UI content
+                      Options:
+                        --namespace <ns>  Target ingress namespace (default: monitoring)
+                        --detailed        Include response previews for troubleshooting
+
   help                Show this help message
 
 Examples:
@@ -169,6 +178,9 @@ Examples:
 
   Get access URLs:
     ./observability.sh url
+
+  Validate ingress endpoints:
+    ./observability.sh validate --detailed
 
 EOF
 }
@@ -300,6 +312,48 @@ show_logs() {
     fi
 }
 
+# Function to validate ingress endpoints
+run_validation() {
+    local namespace="$NAMESPACE_MONITORING"
+    local detailed=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --namespace)
+                namespace="$2"
+                shift 2
+                ;;
+            --detailed)
+                detailed=true
+                shift
+                ;;
+            *)
+                print_error "Unknown option for validate: $1"
+                echo ""
+                print_info "Usage: ./observability.sh validate [--namespace <ns>] [--detailed]"
+                return 1
+                ;;
+        esac
+    done
+
+    local validation_script="${OBSERVABILITY_DIR}/validate-ingress.sh"
+    if [ ! -f "$validation_script" ]; then
+        print_error "Validation script not found at ${validation_script#$PROJECT_ROOT/}"
+        return 1
+    fi
+
+    local -a args=(--namespace "$namespace")
+    if [ "$detailed" = true ]; then
+        args+=(--detailed)
+    fi
+
+    print_section "Ingress Endpoint Validation"
+    print_info "Using LoadBalancer defined in namespace '$namespace'"
+    echo ""
+
+    bash "$validation_script" "${args[@]}"
+}
+
 # Function to get and display Ingress LoadBalancer URL
 get_ingress_url() {
     load_observability_env
@@ -348,6 +402,10 @@ main() {
             ;;
         url|urls|access)
             get_ingress_url
+            ;;
+        validate)
+            shift
+            run_validation "$@"
             ;;
         help)
             show_help
