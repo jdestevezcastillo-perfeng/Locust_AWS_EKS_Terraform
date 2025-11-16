@@ -975,6 +975,16 @@ tolerations:
     effect: NoSchedule
 tempo:
   retention: 168h
+metricsGenerator:
+  enabled: true
+  replicas: 1
+  config:
+    storage:
+      path: /var/tempo/wal
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClassName: gp2
 tempoQuery:
   enabled: true
   service:
@@ -1143,194 +1153,15 @@ EOF
 deploy_locust_dashboards() {
     print_section "Deploying Locust Monitoring Dashboards"
 
-    # Create ConfigMap with Locust dashboard
-    cat > /tmp/locust-dashboard.json <<'EOF'
-{
-  "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "datasource",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
-      }
-    ]
-  },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
-  "id": null,
-  "links": [],
-  "liveNow": false,
-  "panels": [
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "expr": "up{job=\"locust-master\"}",
-          "refId": "A"
-        }
-      ],
-      "title": "Locust Master Status",
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "container_memory_usage_bytes{pod=~\"locust-.*\",namespace=\"locust\"} / 1024 / 1024",
-          "legendFormat": "{{pod}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Locust Pods Memory Usage",
-      "type": "timeseries"
-    }
-  ],
-  "refresh": "30s",
-  "schemaVersion": 38,
-  "style": "dark",
-  "tags": ["locust", "load-testing"],
-  "templating": {
-    "list": []
-  },
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
-  "timepicker": {},
-  "timezone": "",
-  "title": "Locust Load Testing Dashboard",
-  "uid": "locust-dashboard",
-  "version": 0,
-  "weekStart": ""
-}
-EOF
+    local dashboard_file="${PROJECT_ROOT}/scripts/observability/dashboards/locust-for-prometheus.json"
+    if [ ! -f "$dashboard_file" ]; then
+        print_error "Dashboard file not found: $dashboard_file"
+        return 1
+    fi
 
     # Create ConfigMap
     kubectl create configmap locust-dashboard \
-        --from-file=/tmp/locust-dashboard.json \
+        --from-file=locust-dashboard.json="$dashboard_file" \
         -n "$GRAFANA_NAMESPACE" \
         --dry-run=client -o yaml | kubectl apply -f -
 
