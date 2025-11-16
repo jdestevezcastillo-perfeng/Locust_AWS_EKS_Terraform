@@ -940,6 +940,14 @@ promtail:
       effect: NoSchedule
     - key: workload
       operator: Equal
+      value: locust-master
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: locust-worker
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
       value: monitoring
       effect: NoSchedule
   pipelineStages: []
